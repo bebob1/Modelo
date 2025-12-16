@@ -1,10 +1,19 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-import keras
-from keras.models import Model
-from keras.layers import Dense, Input, Concatenate, Dropout, BatchNormalization
-from keras.optimizers import Adam
+# Usar tf_keras para compatibilidad con Transformers
+try:
+    import tf_keras as keras
+    from tf_keras.models import Model
+    from tf_keras.layers import Dense, Input, Concatenate, Dropout, BatchNormalization
+    from tf_keras.optimizers import Adam
+except ImportError:
+    # Fallback a keras si tf_keras no está disponible
+    import keras
+    from keras.models import Model
+    from keras.layers import Dense, Input, Concatenate, Dropout, BatchNormalization
+    from keras.optimizers import Adam
+
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.class_weight import compute_class_weight
@@ -18,14 +27,30 @@ from imblearn.over_sampling import SMOTE
 # Configuración
 MAX_LENGTH = 128
 BATCH_SIZE = 16  # Reducido para mejor estabilidad
-EPOCHS = 15
-LEARNING_RATE = 1e-5  # Reducido para mejor convergencia
+EPOCHS = 20  # Aumentado para mejor aprendizaje
+LEARNING_RATE = 2e-5  # Ajustado para mejor convergencia con más características
 SEED = 42
 
-print("Cargando el tokenizador y modelo BETO...")
-# Cargar el tokenizador y modelo BETO (BERT para español)
-tokenizer = BertTokenizerFast.from_pretrained("dccuchile/bert-base-spanish-wwm-cased")
-bert_model = TFBertModel.from_pretrained("dccuchile/bert-base-spanish-wwm-cased")
+# Variables globales para BERT (se cargarán cuando sea necesario)
+tokenizer = None
+bert_model = None
+
+def cargar_bert():
+    """Carga el tokenizador y modelo BETO de manera lazy"""
+    global tokenizer, bert_model
+    if tokenizer is None or bert_model is None:
+        print("\n" + "="*70)
+        print("CARGANDO MODELO BERT (BETO) PARA ESPAÑOL")
+        print("="*70)
+        print("Esto puede tardar unos minutos la primera vez...")
+        print("Descargando tokenizador...")
+        tokenizer = BertTokenizerFast.from_pretrained("dccuchile/bert-base-spanish-wwm-cased")
+        print("✓ Tokenizador cargado")
+        print("Descargando modelo BERT (puede tardar varios minutos)...")
+        bert_model = TFBertModel.from_pretrained("dccuchile/bert-base-spanish-wwm-cased")
+        print("✓ Modelo BERT cargado exitosamente")
+        print("="*70 + "\n")
+    return tokenizer, bert_model
 
 def cargar_datos(ruta_archivo):
     """
@@ -182,6 +207,7 @@ def cargar_datos(ruta_archivo):
 def extraer_caracteristicas_mejoradas(df):
     """
     Extrae características más balanceadas y menos sesgadas.
+    Incluye detección especial para números que empiezan por 3 (móviles colombianos).
     """
     print("Extrayendo características mejoradas...")
     
@@ -192,60 +218,132 @@ def extraer_caracteristicas_mejoradas(df):
         lambda x: sum(1 for c in str(x) if c.isupper()) / max(len(str(x)), 1)
     )
     
-    # Características del remitente más balanceadas
+    # Características del remitente MEJORADAS
     df['remitente_longitud'] = df['remitente'].apply(lambda x: len(str(x)))
     df['remitente_es_numerico'] = df['remitente'].apply(lambda x: 1 if str(x).isdigit() else 0)
     df['remitente_tiene_letras'] = df['remitente'].apply(
         lambda x: 1 if any(c.isalpha() for c in str(x)) else 0
     )
     
+    # NUEVA: Detectar si el número empieza por 3 (números móviles en Colombia)
+    # Esto es sospechoso si viene con características fraudulentas
+    def empieza_por_3(remitente):
+        rem_str = str(remitente).strip()
+        # Verificar si es numérico y empieza por 3
+        if rem_str and rem_str[0] == '3' and rem_str.isdigit():
+            return 1
+        return 0
+    
+    df['remitente_empieza_3'] = df['remitente'].apply(empieza_por_3)
+    
+    # NUEVA: Detectar números cortos sospechosos (4-6 dígitos)
+    # Estos suelen ser servicios legítimos, pero también pueden ser spoofing
+    def es_numero_corto(remitente):
+        rem_str = str(remitente).strip()
+        if rem_str.isdigit() and 4 <= len(rem_str) <= 6:
+            return 1
+        return 0
+    
+    df['remitente_numero_corto'] = df['remitente'].apply(es_numero_corto)
+    
+    # NUEVA: Detectar números de longitud estándar de móvil (10 dígitos en Colombia)
+    def es_movil_estandar(remitente):
+        rem_str = str(remitente).strip()
+        if rem_str.isdigit() and len(rem_str) == 10 and rem_str[0] == '3':
+            return 1
+        return 0
+    
+    df['remitente_movil_estandar'] = df['remitente'].apply(es_movil_estandar)
+    
+    # NUEVA: Detectar números con longitud anormal (ni corto ni estándar)
+    def longitud_anormal(remitente):
+        rem_str = str(remitente).strip()
+        if rem_str.isdigit():
+            longitud = len(rem_str)
+            # Anormal si no es corto (4-6) ni estándar (10) ni muy corto (1-3)
+            if longitud > 6 and longitud != 10:
+                return 1
+        return 0
+    
+    df['remitente_longitud_anormal'] = df['remitente'].apply(longitud_anormal)
+    
     # Características de contenido más específicas
     df['contiene_url'] = df['mensaje'].apply(
-        lambda x: 1 if re.search(r'http[s]?://|www\.|\.com|\.org|\.net|bit\.ly', str(x).lower()) else 0
+        lambda x: 1 if re.search(r'http[s]?://|www\.|\\.com|\\.org|\\.net|bit\\.ly|\\.co\\b', str(x).lower()) else 0
     )
     
-    # Palabras clave de urgencia más específicas
-    palabras_urgencia = ['urgente', 'inmediatamente', 'ahora', 'rápido', 'expira', 'vence', 'último día']
+    # MEJORADO: Palabras clave de urgencia más específicas y completas
+    palabras_urgencia = [
+        'urgente', 'inmediatamente', 'ahora', 'rápido', 'expira', 'vence', 
+        'último día', 'última oportunidad', 'solo hoy', 'caduca', 'apresúrate'
+    ]
     df['contiene_urgencia'] = df['mensaje'].apply(
         lambda x: 1 if any(palabra in str(x).lower() for palabra in palabras_urgencia) else 0
     )
     
-    # Palabras relacionadas con dinero/ofertas más específicas
-    palabras_dinero = ['$', 'pesos', 'dinero', 'gratis', 'premio', 'ganador', 'reembolso', 'descuento']
+    # MEJORADO: Palabras relacionadas con dinero/ofertas más específicas
+    palabras_dinero = [
+        '$', 'pesos', 'dinero', 'gratis', 'premio', 'ganador', 'reembolso', 
+        'descuento', 'oferta', 'promoción', 'cashback', 'devolución', 'abono'
+    ]
     df['contiene_dinero'] = df['mensaje'].apply(
         lambda x: 1 if any(palabra in str(x).lower() for palabra in palabras_dinero) else 0
     )
     
     # Palabras bancarias/financieras
-    palabras_banco = ['banco', 'cuenta', 'tarjeta', 'crédito', 'débito', 'saldo', 'transacción']
+    palabras_banco = [
+        'banco', 'cuenta', 'tarjeta', 'crédito', 'débito', 'saldo', 
+        'transacción', 'transferencia', 'clave', 'pin', 'token'
+    ]
     df['contiene_banco'] = df['mensaje'].apply(
         lambda x: 1 if any(palabra in str(x).lower() for palabra in palabras_banco) else 0
     )
     
-    # Características de verificación/autenticación (común en phishing)
-    palabras_verificacion = ['verificar', 'confirmar', 'actualizar', 'validar', 'suspendido', 'bloqueado']
+    # MEJORADO: Características de verificación/autenticación (común en phishing)
+    palabras_verificacion = [
+        'verificar', 'confirmar', 'actualizar', 'validar', 'suspendido', 
+        'bloqueado', 'reactivar', 'activar', 'ingresar', 'ingrese', 'haz clic', 'click aquí'
+    ]
     df['contiene_verificacion'] = df['mensaje'].apply(
         lambda x: 1 if any(palabra in str(x).lower() for palabra in palabras_verificacion) else 0
     )
     
     # Características de servicios legítimos comunes
-    servicios_legitimos = ['didi', 'uber', 'rappi', 'bancolombia', 'davivienda', 'nequi']
+    servicios_legitimos = [
+        'didi', 'uber', 'rappi', 'bancolombia', 'davivienda', 'nequi', 
+        'daviplata', 'bbva', 'banco de bogota'
+    ]
     df['menciona_servicio_conocido'] = df['mensaje'].apply(
         lambda x: 1 if any(servicio in str(x).lower() for servicio in servicios_legitimos) else 0
     )
     
-    # Patrones sospechosos más específicos
+    # MEJORADO: Patrones sospechosos más específicos
     df['tiene_errores_ortograficos'] = df['mensaje'].apply(
         lambda x: 1 if ('isu' in str(x).lower() or 'extranamos' in str(x).lower() or 
-                        'cancelo' in str(x).lower()) else 0
+                        'cancelo' in str(x).lower() or 'extranos' in str(x).lower() or
+                        'abonara' in str(x).lower()) else 0
+    )
+    
+    # NUEVA: Detectar combinación sospechosa (número empieza por 3 + características fraudulentas)
+    df['sospecha_movil_fraudulento'] = (
+        (df['remitente_empieza_3'] == 1) & 
+        ((df['contiene_url'] == 1) | (df['contiene_verificacion'] == 1) | 
+         (df['tiene_errores_ortograficos'] == 1))
+    ).astype(int)
+    
+    # NUEVA: Detectar números de caracteres especiales en el mensaje
+    df['mensaje_caracteres_especiales'] = df['mensaje'].apply(
+        lambda x: sum(1 for c in str(x) if not c.isalnum() and not c.isspace()) / max(len(str(x)), 1)
     )
     
     # Características númericas para alimentar al modelo junto con BERT
     caracteristicas_numericas = df[[
-        'mensaje_longitud', 'mensaje_palabras', 'mensaje_mayusculas_ratio',
+        'mensaje_longitud', 'mensaje_palabras', 'mensaje_mayusculas_ratio', 'mensaje_caracteres_especiales',
         'remitente_longitud', 'remitente_es_numerico', 'remitente_tiene_letras',
+        'remitente_empieza_3', 'remitente_numero_corto', 'remitente_movil_estandar', 'remitente_longitud_anormal',
         'contiene_url', 'contiene_urgencia', 'contiene_dinero', 'contiene_banco',
-        'contiene_verificacion', 'menciona_servicio_conocido', 'tiene_errores_ortograficos'
+        'contiene_verificacion', 'menciona_servicio_conocido', 'tiene_errores_ortograficos',
+        'sospecha_movil_fraudulento'
     ]].values
     
     return df, caracteristicas_numericas
@@ -254,6 +352,10 @@ def extraer_caracteristicas_bert(textos, max_length=MAX_LENGTH):
     """
     Extrae características de BERT para una lista de textos.
     """
+    # Cargar BERT si no está cargado
+    global tokenizer, bert_model
+    tokenizer, bert_model = cargar_bert()
+    
     print("Extrayendo características de BERT...")
     # Tokenizar los textos
     tokens = tokenizer(
@@ -268,8 +370,14 @@ def extraer_caracteristicas_bert(textos, max_length=MAX_LENGTH):
     batch_size = 8  # Reducido para mayor estabilidad
     all_features = []
     
+    total_batches = (len(textos) + batch_size - 1) // batch_size
+    print(f"Procesando {len(textos)} textos en {total_batches} lotes...")
+    
     for i in range(0, len(textos), batch_size):
         end_idx = min(i + batch_size, len(textos))
+        batch_num = (i // batch_size) + 1
+        print(f"  Procesando lote {batch_num}/{total_batches}...", end='\r')
+        
         batch_input_ids = tokens['input_ids'][i:end_idx]
         batch_attention_mask = tokens['attention_mask'][i:end_idx]
         
@@ -282,12 +390,15 @@ def extraer_caracteristicas_bert(textos, max_length=MAX_LENGTH):
         # Guardar el pooled output (representación del token [CLS])
         all_features.append(outputs.pooler_output.numpy())
     
+    print(f"\n✓ Características BERT extraídas para {len(textos)} textos")
+    
     # Concatenar todos los lotes
     return np.vstack(all_features)
 
 def crear_modelo_mejorado(num_features):
     """
     Crea un modelo mejorado con regularización y arquitectura optimizada.
+    Diseñado para manejar mejor las características del remitente.
     """
     print("Creando modelo mejorado...")
     
@@ -296,15 +407,18 @@ def crear_modelo_mejorado(num_features):
     num_input = Input(shape=(num_features,), dtype=tf.float32, name='num_features')
     
     # Procesamiento de características de BERT con más regularización
-    bert_branch = Dense(512, activation='relu')(bert_input)
+    bert_branch = Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(bert_input)
     bert_branch = BatchNormalization()(bert_branch)
-    bert_branch = Dropout(0.3)(bert_branch)
-    bert_branch = Dense(256, activation='relu')(bert_branch)
+    bert_branch = Dropout(0.4)(bert_branch)
+    bert_branch = Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(bert_branch)
     bert_branch = BatchNormalization()(bert_branch)
     bert_branch = Dropout(0.3)(bert_branch)
     
-    # Procesamiento de características numéricas
-    num_branch = Dense(128, activation='relu')(num_input)
+    # Procesamiento de características numéricas - MÁS PROFUNDO para las nuevas características
+    num_branch = Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(num_input)
+    num_branch = BatchNormalization()(num_branch)
+    num_branch = Dropout(0.3)(num_branch)
+    num_branch = Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(num_branch)
     num_branch = BatchNormalization()(num_branch)
     num_branch = Dropout(0.2)(num_branch)
     num_branch = Dense(64, activation='relu')(num_branch)
@@ -312,10 +426,10 @@ def crear_modelo_mejorado(num_features):
     
     # Combinar ambas representaciones
     combined = Concatenate()([bert_branch, num_branch])
-    combined = Dense(256, activation='relu')(combined)
+    combined = Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(combined)
     combined = BatchNormalization()(combined)
     combined = Dropout(0.4)(combined)
-    combined = Dense(128, activation='relu')(combined)
+    combined = Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(combined)
     combined = Dropout(0.3)(combined)
     combined = Dense(64, activation='relu')(combined)
     combined = Dropout(0.2)(combined)
@@ -359,12 +473,18 @@ def entrenar_modelo_balanceado(model, X_train_bert, X_train_features, y_train,
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor='val_auc',
-            patience=5,
+            patience=7,  # Aumentado para dar más tiempo al modelo
             restore_best_weights=True,
             mode='max',
             verbose=1
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=3,
+            min_lr=1e-7,
+            verbose=1
         )
-        # Nota: ReduceLROnPlateau removido temporalmente por incompatibilidad con algunas versiones de Keras
     ]
     
     print("Entrenando el modelo con balanceo de clases...")
@@ -409,6 +529,7 @@ def encontrar_umbral_optimo(model, X_val_bert, X_val_features, y_val):
 def predecir_fraude_mejorado(model, mensaje, remitente, umbral_optimo=0.5):
     """
     Predice si un mensaje es fraudulento usando el umbral optimizado.
+    Incluye análisis detallado del remitente.
     """
     # Crear DataFrame temporal para procesar
     temp_df = pd.DataFrame({
@@ -444,13 +565,18 @@ def predecir_fraude_mejorado(model, mensaje, remitente, umbral_optimo=0.5):
     # Obtener factores de riesgo de las características extraídas
     factores_riesgo = {
         "remitente_es_numerico": bool(temp_df['remitente_es_numerico'].iloc[0]),
+        "remitente_empieza_3": bool(temp_df['remitente_empieza_3'].iloc[0]),
+        "remitente_numero_corto": bool(temp_df['remitente_numero_corto'].iloc[0]),
+        "remitente_movil_estandar": bool(temp_df['remitente_movil_estandar'].iloc[0]),
+        "remitente_longitud_anormal": bool(temp_df['remitente_longitud_anormal'].iloc[0]),
         "contiene_url": bool(temp_df['contiene_url'].iloc[0]),
         "contiene_urgencia": bool(temp_df['contiene_urgencia'].iloc[0]),
         "contiene_dinero": bool(temp_df['contiene_dinero'].iloc[0]),
         "contiene_banco": bool(temp_df['contiene_banco'].iloc[0]),
         "contiene_verificacion": bool(temp_df['contiene_verificacion'].iloc[0]),
         "tiene_errores_ortograficos": bool(temp_df['tiene_errores_ortograficos'].iloc[0]),
-        "menciona_servicio_conocido": bool(temp_df['menciona_servicio_conocido'].iloc[0])
+        "menciona_servicio_conocido": bool(temp_df['menciona_servicio_conocido'].iloc[0]),
+        "sospecha_movil_fraudulento": bool(temp_df['sospecha_movil_fraudulento'].iloc[0])
     }
     
     return {
@@ -497,13 +623,22 @@ def evaluar_modelo_detallado(model, X_test_bert, X_test_features, y_test, umbral
 
 def principal_mejorado(ruta_archivo, guardar=True):
     """
+    print("\n" + "="*70)
+    print("MODELO DE DETECCIÓN DE SMISHING MEJORADO")
+    print("="*70)
+    print()
+    
     Función principal mejorada que ejecuta todo el flujo de trabajo.
     Acepta archivos Excel (.xlsx, .xls) o de texto (.txt).
     """
+    print("📂 PASO 1/7: Cargando datos...")
     # Cargar y preprocesar datos
     df = cargar_datos(ruta_archivo)
+    print("\n📊 PASO 2/7: Extrayendo características mejoradas...")
     df, caracteristicas_numericas = extraer_caracteristicas_mejoradas(df)
+    print(f"✓ {caracteristicas_numericas.shape[1]} características numéricas extraídas")
     
+    print("\n🔀 PASO 3/7: Dividiendo datos en conjuntos...")
     # Dividir en conjuntos de entrenamiento y prueba
     X_train, X_test, y_train, y_test, X_train_num, X_test_num = train_test_split(
         df['mensaje'], df['es_fraude'], caracteristicas_numericas, 
@@ -524,15 +659,24 @@ def principal_mejorado(ruta_archivo, guardar=True):
     print(f"Fraude en validación: {np.sum(y_val)} ({np.mean(y_val)*100:.1f}%)")
     print(f"Fraude en prueba: {np.sum(y_test)} ({np.mean(y_test)*100:.1f}%)")
     
+    print("\n🧠 PASO 4/7: Extrayendo características BERT...")
+    print("  (Esto puede tardar varios minutos)")
+    print("\n  Conjunto de entrenamiento:")
     # Extraer características de BERT para cada conjunto de datos
     X_train_bert = extraer_caracteristicas_bert(X_train)
+    print("\n  Conjunto de validación:")
     X_val_bert = extraer_caracteristicas_bert(X_val)
+    print("\n  Conjunto de prueba:")
     X_test_bert = extraer_caracteristicas_bert(X_test)
     
+    print("\n🏗️  PASO 5/7: Creando arquitectura del modelo...")
     # Crear el modelo mejorado
     modelo = crear_modelo_mejorado(X_train_num.shape[1])
+    print("\nResumen del modelo:")
     print(modelo.summary())
     
+    print("\n🎓 PASO 6/7: Entrenando el modelo...")
+    print("  (Esto puede tardar bastante tiempo dependiendo de tu hardware)")
     # Entrenar el modelo con balanceo
     historia = entrenar_modelo_balanceado(
         modelo, 
@@ -540,19 +684,22 @@ def principal_mejorado(ruta_archivo, guardar=True):
         X_val_bert, X_val_num, y_val
     )
     
+    print("\n🎯 PASO 7/7: Optimizando umbral de clasificación...")
     # Encontrar umbral óptimo
     umbral_optimo = encontrar_umbral_optimo(modelo, X_val_bert, X_val_num, y_val)
     
+    print("\n📈 Evaluando modelo en conjunto de prueba...")
     # Evaluación detallada
     evaluar_modelo_detallado(modelo, X_test_bert, X_test_num, y_test, umbral_optimo)
     
     # Guardar el modelo si se solicita
     if guardar:
+        print("\n💾 Guardando modelo...")
         modelo.save("modelo_detector_smishing_mejorado.keras")
         # Guardar también el umbral óptimo
         np.save("umbral_optimo.npy", umbral_optimo)
-        print(f"\nModelo guardado como 'modelo_detector_smishing_mejorado.keras'")
-        print(f"Umbral óptimo guardado como 'umbral_optimo.npy'")
+        print(f"✓ Modelo guardado como 'modelo_detector_smishing_mejorado.keras'")
+        print(f"✓ Umbral óptimo guardado como 'umbral_optimo.npy'")
     
     # Ejemplos de uso para predicción con el nuevo umbral
     print("\n" + "="*50)
@@ -570,7 +717,15 @@ def principal_mejorado(ruta_archivo, guardar=True):
         },
         {
             'mensaje': 'Su cuenta bancaria ha sido suspendida. Ingrese a http://banco-verificacion.com para reactivarla.',
-            'remitente': '312456789'
+            'remitente': '312456789'  # Número móvil (empieza por 3) con URL sospechosa
+        },
+        {
+            'mensaje': 'URGENTE: Confirme sus datos bancarios en este enlace www.banco-falso.co o su cuenta será bloqueada.',
+            'remitente': '3001234567'  # Número móvil completo (10 dígitos) con características fraudulentas
+        },
+        {
+            'mensaje': 'Ganaste un premio de $5.000.000! Haz clic aquí para reclamarlo: bit.ly/premio123',
+            'remitente': '3209876543'  # Número móvil con oferta sospechosa
         },
         {
             'mensaje': 'Hola! Tu pedido de DiDi Food está en camino. Llegará en 15 minutos aproximadamente.',
@@ -579,6 +734,10 @@ def principal_mejorado(ruta_archivo, guardar=True):
         {
             'mensaje': 'Bancolombia: Su transaccion por $50.000 fue aprobada. Saldo actual: $150.000',
             'remitente': 'BANCOLOMBIA'
+        },
+        {
+            'mensaje': 'Tu viaje con Uber ha finalizado. Total: $12.500. Gracias por usar Uber!',
+            'remitente': '3005551234'  # Número móvil legítimo de Uber
         }
     ]
     
