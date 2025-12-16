@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Modelos entrenados (grandes)
+*.keras
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+
+# Datos de entrenamiento
+*.npy
+*.npz
+
+# Logs
+*.log
+entrenamiento_*.log
+
+# Backups
+*_backup.py
+*_antes_cambios.py
+modelo2_backup.py
+
+# Scripts temporales
+aplicar_cambios*.py
+aplicar_cambios*.sh
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Datos sensibles (mantener solo ejemplos)
+# datos_sms.txt  # Descomentar si no quieres subir los datos
+# datos_sms.xlsx
+
+# Archivos temporales de TensorFlow
+.tensorboard/
+logs/
+
+# Cache de transformers
+.cache/
+transformers_cache/
