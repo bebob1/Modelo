@@ -26,10 +26,12 @@ from imblearn.over_sampling import SMOTE
 
 # Configuración
 MAX_LENGTH = 128
-BATCH_SIZE = 16  # Reducido para mejor estabilidad
-EPOCHS = 20  # Aumentado para mejor aprendizaje
-LEARNING_RATE = 2e-5  # Ajustado para mejor convergencia con más características
+BATCH_SIZE = 8  # Reducido para fine-tuning de BERT
+EPOCHS = 25  # Aumentado para mejor aprendizaje con fine-tuning
+LEARNING_RATE = 3e-5  # Ajustado para fine-tuning de BERT
+BERT_LEARNING_RATE = 2e-5  # Learning rate específico para BERT
 SEED = 42
+FINE_TUNE_BERT = False  # Desactivado temporalmente - las nuevas características ya mejoran mucho el modelo
 
 # Variables globales para BERT (se cargarán cuando sea necesario)
 tokenizer = None
@@ -54,127 +56,36 @@ def cargar_bert():
 
 def cargar_datos(ruta_archivo):
     """
-    Carga y preprocesa los datos del archivo (Excel o TXT).
+    Carga y preprocesa los datos del archivo CSV o Excel.
+    Los datos deben tener columnas: Remitente, MensajesF (fraude), MensajesV (legítimos)
     """
     print(f"Cargando datos desde {ruta_archivo}...")
     
-    # Detectar el tipo de archivo
-    if ruta_archivo.endswith('.txt'):
-        # Leer archivo de texto con tabulaciones
-        print("Detectado archivo de texto (.txt)")
-        
-        # Intentar diferentes codificaciones
-        encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'windows-1252']
-        df = None
-        
-        for encoding in encodings:
-            try:
-                print(f"Intentando leer con codificación: {encoding}")
-                df = pd.read_csv(ruta_archivo, sep='\t', encoding=encoding, skiprows=2)
-                print(f"✓ Archivo leído exitosamente con codificación: {encoding}")
-                break
-            except UnicodeDecodeError:
-                print(f"✗ Falló con codificación: {encoding}")
-                continue
-            except Exception as e:
-                print(f"✗ Error con codificación {encoding}: {e}")
-                continue
-        
-        if df is None:
-            raise Exception("No se pudo leer el archivo con ninguna codificación conocida.")
-        
-        # Limpiar nombres de columnas (eliminar espacios)
-        df.columns = df.columns.str.strip()
-        
-        print(f"\nColumnas encontradas: {df.columns.tolist()}")
-        print(f"Primeras 3 filas:")
-        print(df.head(3))
-        
+    # Leer el archivo
+    if ruta_archivo.endswith('.csv'):
+        df = pd.read_csv(ruta_archivo)
+    elif ruta_archivo.endswith(('.xlsx', '.xls')):
+        # Leer Excel saltando las primeras 3 filas y usando fila 1 como header
+        df = pd.read_excel(ruta_archivo, header=1, skiprows=[0])
     else:
-        # Intentar leer como Excel
-        print("Intentando leer como archivo Excel...")
-        xls = pd.ExcelFile(ruta_archivo)
-        print(f"Hojas disponibles en el Excel: {xls.sheet_names}")
-        
-        # Intentar cargar cada hoja hasta encontrar una con los datos correctos
-        df = None
-        for sheet_name in xls.sheet_names:
-            print(f"\nIntentando cargar la hoja: {sheet_name}")
-            # Probar diferentes configuraciones para header
-            for header in [0, 1, 2, 3]:
-                try:
-                    temp_df = pd.read_excel(ruta_archivo, sheet_name=sheet_name, header=header)
-                    print(f"Encabezados con header={header}: {temp_df.columns.tolist()}")
-                    
-                    # Verificar si algunas columnas relevantes están presentes
-                    if ('MensajesF' in temp_df.columns or 'MensajesV' in temp_df.columns or 
-                        'Remitente' in temp_df.columns):
-                        df = temp_df
-                        print(f"¡Encontrados encabezados en la hoja {sheet_name} con header={header}!")
-                        break
-                except Exception as e:
-                    print(f"Error al intentar con header={header}: {e}")
-            
-            if df is not None:
-                break
-        
-        if df is None:
-            # Si todavía no se ha encontrado, intentar con la primera hoja y encabezados personalizados
-            print("\nIntentando con la primera hoja y encabezados personalizados...")
-            first_sheet = xls.sheet_names[0]
-            df = pd.read_excel(ruta_archivo, sheet_name=first_sheet, header=None)
-            # Asignar nombres de columnas basados en la imagen que compartiste
-            if len(df.columns) >= 5:  # Asegurarse de que hay suficientes columnas
-                df.columns = ['ID', 'Nombre del usuario', 'Remitente', 'MensajesF', 'MensajesV']
-            else:
-                raise Exception("No se pudo determinar la estructura del Excel. Por favor, verifica el formato del archivo.")
+        raise ValueError("Formato de archivo no soportado. Use .csv, .xlsx o .xls")
     
-    print("\nEncabezados encontrados:", df.columns.tolist())
-    print("Primeras 3 filas:")
-    print(df.head(3))
+    print(f"✓ Archivo cargado: {len(df)} filas")
+    print(f"Columnas: {list(df.columns)}")
     
-    # Verificar la presencia de columnas necesarias
-    columnas_necesarias = ['MensajesF', 'MensajesV', 'Remitente']
-    for col in columnas_necesarias:
-        if col not in df.columns:
-            # Buscar alternativas (nombres similares o transformados)
-            alternativas = [c for c in df.columns if col.lower() in c.lower()]
-            if alternativas:
-                print(f"Usando '{alternativas[0]}' en lugar de '{col}'")
-                # Renombrar la columna
-                df = df.rename(columns={alternativas[0]: col})
+    # Verificar columnas necesarias
+    if 'MensajesF' not in df.columns or 'MensajesV' not in df.columns:
+        raise ValueError("El archivo debe tener columnas 'MensajesF' y 'MensajesV'")
     
-    # En este punto, deberíamos tener las columnas correctas o habrá fallado antes
-    try:
-        # Filtrar filas vacías y obtener los datos
-        mensajes_fraude = df['MensajesF'].dropna().reset_index(drop=True)
-        mensajes_legitimos = df['MensajesV'].dropna().reset_index(drop=True)
-        
-        # Para los remitentes, necesitamos alinearlos con los mensajes
-        # Crear una copia del dataframe para trabajar
-        df_temp = df.copy()
-        
-        # Obtener remitentes para fraude (filas que tienen MensajesF no vacío)
-        df_fraude_temp = df_temp[df_temp['MensajesF'].notna()].copy()
-        remitentes_fraude = df_fraude_temp['Remitente'].fillna('').reset_index(drop=True)
-        
-        # Obtener remitentes para legítimos (filas que tienen MensajesV no vacío)
-        df_legitimo_temp = df_temp[df_temp['MensajesV'].notna()].copy()
-        remitentes_legitimos = df_legitimo_temp['Remitente'].fillna('').reset_index(drop=True)
-        
-        # Asegurar que las longitudes coincidan
-        min_fraude = min(len(mensajes_fraude), len(remitentes_fraude))
-        mensajes_fraude = mensajes_fraude[:min_fraude]
-        remitentes_fraude = remitentes_fraude[:min_fraude]
-        
-        min_legitimo = min(len(mensajes_legitimos), len(remitentes_legitimos))
-        mensajes_legitimos = mensajes_legitimos[:min_legitimo]
-        remitentes_legitimos = remitentes_legitimos[:min_legitimo]
-        
-    except KeyError as e:
-        print(f"Error al acceder a la columna después de todos los intentos: {e}")
-        print("Columnas disponibles:", df.columns.tolist())
-        raise Exception(f"No se pudo acceder a columnas necesarias: {e}")
+    # Extraer mensajes fraudulentos (MensajesF)
+    df_fraude_temp = df[df['MensajesF'].notna()].copy()
+    mensajes_fraude = df_fraude_temp['MensajesF'].values
+    remitentes_fraude = df_fraude_temp['Remitente'].fillna('').astype(str).values
+    
+    # Extraer mensajes legítimos (MensajesV)
+    df_legitimo_temp = df[df['MensajesV'].notna()].copy()
+    mensajes_legitimos = df_legitimo_temp['MensajesV'].values
+    remitentes_legitimos = df_legitimo_temp['Remitente'].fillna('').astype(str).values
     
     # Crear DataFrames separados
     df_fraude = pd.DataFrame({
@@ -192,8 +103,12 @@ def cargar_datos(ruta_archivo):
     # Combinar ambos DataFrames
     df_combinado = pd.concat([df_fraude, df_legitimo], ignore_index=True)
     
-    # Convertir remitentes a string para asegurar compatibilidad
+    # Limpiar datos
+    df_combinado['mensaje'] = df_combinado['mensaje'].astype(str)
     df_combinado['remitente'] = df_combinado['remitente'].astype(str)
+    
+    # Eliminar filas con mensajes vacíos
+    df_combinado = df_combinado[df_combinado['mensaje'].str.strip() != ''].reset_index(drop=True)
     
     print(f"\n{'='*50}")
     print(f"Total de mensajes: {len(df_combinado)}")
@@ -336,6 +251,29 @@ def extraer_caracteristicas_mejoradas(df):
         lambda x: sum(1 for c in str(x) if not c.isalnum() and not c.isspace()) / max(len(str(x)), 1)
     )
     
+    # NUEVA: Detectar patrones de premio/ganancia (MUY SOSPECHOSO)
+    palabras_premio = ['ganaste', 'ganador', 'premio', 'sorteo', 'lotería', 'felicidades', 'felicitaciones']
+    df['contiene_premio'] = df['mensaje'].apply(
+        lambda x: 1 if any(palabra in str(x).lower() for palabra in palabras_premio) else 0
+    )
+    
+    # NUEVA: Detectar cantidades grandes de dinero (patrón de estafa)
+    df['monto_grande'] = df['mensaje'].apply(
+        lambda x: 1 if re.search(r'\$\s*[1-9]\d{5,}|\d{1,3}(?:[.,]\d{3}){2,}', str(x)) else 0
+    )
+    
+    # NUEVA: Detectar llamadas a la acción sospechosas
+    llamadas_accion = ['haz clic', 'click aquí', 'clic aquí', 'ingresa', 'ingrese', 'visita', 'entra']
+    df['llamada_accion_sospechosa'] = df['mensaje'].apply(
+        lambda x: 1 if any(llamada in str(x).lower() for llamada in llamadas_accion) else 0
+    )
+    
+    # NUEVA: Combinación premio + URL + acción (ALTAMENTE SOSPECHOSO)
+    df['patron_estafa_premio'] = (
+        ((df['contiene_premio'] == 1) | (df['monto_grande'] == 1)) &
+        ((df['contiene_url'] == 1) | (df['llamada_accion_sospechosa'] == 1))
+    ).astype(int)
+    
     # Características númericas para alimentar al modelo junto con BERT
     caracteristicas_numericas = df[[
         'mensaje_longitud', 'mensaje_palabras', 'mensaje_mayusculas_ratio', 'mensaje_caracteres_especiales',
@@ -343,7 +281,8 @@ def extraer_caracteristicas_mejoradas(df):
         'remitente_empieza_3', 'remitente_numero_corto', 'remitente_movil_estandar', 'remitente_longitud_anormal',
         'contiene_url', 'contiene_urgencia', 'contiene_dinero', 'contiene_banco',
         'contiene_verificacion', 'menciona_servicio_conocido', 'tiene_errores_ortograficos',
-        'sospecha_movil_fraudulento'
+        'sospecha_movil_fraudulento', 'contiene_premio', 'monto_grande', 'llamada_accion_sospechosa',
+        'patron_estafa_premio'
     ]].values
     
     return df, caracteristicas_numericas
@@ -394,6 +333,111 @@ def extraer_caracteristicas_bert(textos, max_length=MAX_LENGTH):
     
     # Concatenar todos los lotes
     return np.vstack(all_features)
+
+
+def tokenizar_para_finetuning(textos, max_length=MAX_LENGTH):
+    """
+    Tokeniza textos para fine-tuning de BERT.
+    Retorna input_ids y attention_mask.
+    """
+    global tokenizer
+    tokenizer, _ = cargar_bert()
+    
+    print(f"Tokenizando {len(textos)} textos para fine-tuning...")
+    
+    tokens = tokenizer(
+        textos.tolist(),
+        max_length=max_length,
+        padding='max_length',
+        truncation=True,
+        return_tensors='np'
+    )
+    
+    print(f"✓ Textos tokenizados")
+    return tokens['input_ids'], tokens['attention_mask']
+
+def crear_modelo_mejorado_con_bert(num_features):
+    """
+    Crea un modelo con BERT trainable para fine-tuning end-to-end.
+    Permite que BERT aprenda características automáticamente del smishing.
+    """
+    print("Creando modelo con fine-tuning de BERT...")
+    
+    # Cargar BERT si no está cargado
+    global tokenizer, bert_model
+    tokenizer, bert_model = cargar_bert()
+    
+    # Inputs para el modelo
+    input_ids = Input(shape=(MAX_LENGTH,), dtype=tf.int32, name='input_ids')
+    attention_mask = Input(shape=(MAX_LENGTH,), dtype=tf.int32, name='attention_mask')
+    num_input = Input(shape=(num_features,), dtype=tf.float32, name='num_features')
+    
+    # BERT trainable (fine-tuning)
+    if FINE_TUNE_BERT:
+        print("  ⚡ Activando fine-tuning de BERT (aprenderá características automáticamente)")
+        bert_model.trainable = True
+        # Congelar las primeras capas, entrenar solo las últimas
+        for layer in bert_model.layers[:-4]:  # Congelar todas excepto las últimas 4 capas
+            layer.trainable = False
+    else:
+        bert_model.trainable = False
+    
+    # Obtener embeddings de BERT
+    bert_outputs = bert_model(input_ids=input_ids, attention_mask=attention_mask)
+    bert_features = bert_outputs.pooler_output
+    
+    # Procesamiento de características de BERT
+    bert_branch = Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(bert_features)
+    bert_branch = BatchNormalization()(bert_branch)
+    bert_branch = Dropout(0.5)(bert_branch)  # Más dropout para fine-tuning
+    bert_branch = Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(bert_branch)
+    bert_branch = BatchNormalization()(bert_branch)
+    bert_branch = Dropout(0.4)(bert_branch)
+    
+    # Procesamiento de características numéricas - MÁS PROFUNDO
+    num_branch = Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(num_input)
+    num_branch = BatchNormalization()(num_branch)
+    num_branch = Dropout(0.4)(num_branch)
+    num_branch = Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(num_branch)
+    num_branch = BatchNormalization()(num_branch)
+    num_branch = Dropout(0.3)(num_branch)
+    num_branch = Dense(64, activation='relu')(num_branch)
+    num_branch = Dropout(0.2)(num_branch)
+    
+    # Combinar ambas representaciones
+    combined = Concatenate()([bert_branch, num_branch])
+    combined = Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(combined)
+    combined = BatchNormalization()(combined)
+    combined = Dropout(0.5)(combined)
+    combined = Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(combined)
+    combined = Dropout(0.4)(combined)
+    combined = Dense(64, activation='relu')(combined)
+    combined = Dropout(0.3)(combined)
+    
+    # Capa de salida
+    output = Dense(1, activation='sigmoid', name='output')(combined)
+    
+    # Crear modelo
+    model = Model(
+        inputs=[input_ids, attention_mask, num_input],
+        outputs=output
+    )
+    
+    # Compilar con learning rates diferentes para BERT y el resto
+    if FINE_TUNE_BERT:
+        # Usar Adam con learning rate específico para BERT
+        optimizer = Adam(learning_rate=BERT_LEARNING_RATE)
+    else:
+        optimizer = Adam(learning_rate=LEARNING_RATE)
+    
+    model.compile(
+        optimizer=optimizer,
+        loss='binary_crossentropy',
+        metrics=['accuracy', tf.keras.metrics.AUC(name='auc'), 
+                tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
+    )
+    
+    return model
 
 def crear_modelo_mejorado(num_features):
     """
@@ -452,10 +496,67 @@ def crear_modelo_mejorado(num_features):
     
     return model
 
-def entrenar_modelo_balanceado(model, X_train_bert, X_train_features, y_train, 
-                              X_val_bert, X_val_features, y_val):
+def crear_modelo_mejorado(num_features):
+    """
+    Crea un modelo mejorado con regularización y arquitectura optimizada.
+    Diseñado para manejar mejor las características del remitente.
+    """
+    print("Creando modelo mejorado...")
+    
+    # Entrada para características de BERT (ya procesadas) y numéricas
+    bert_input = Input(shape=(768,), dtype=tf.float32, name='bert_features')
+    num_input = Input(shape=(num_features,), dtype=tf.float32, name='num_features')
+    
+    # Procesamiento de características de BERT con más regularización
+    bert_branch = Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(bert_input)
+    bert_branch = BatchNormalization()(bert_branch)
+    bert_branch = Dropout(0.4)(bert_branch)
+    bert_branch = Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(bert_branch)
+    bert_branch = BatchNormalization()(bert_branch)
+    bert_branch = Dropout(0.3)(bert_branch)
+    
+    # Procesamiento de características numéricas - MÁS PROFUNDO para las nuevas características
+    num_branch = Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(num_input)
+    num_branch = BatchNormalization()(num_branch)
+    num_branch = Dropout(0.3)(num_branch)
+    num_branch = Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(num_branch)
+    num_branch = BatchNormalization()(num_branch)
+    num_branch = Dropout(0.2)(num_branch)
+    num_branch = Dense(64, activation='relu')(num_branch)
+    num_branch = Dropout(0.2)(num_branch)
+    
+    # Combinar ambas representaciones
+    combined = Concatenate()([bert_branch, num_branch])
+    combined = Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(combined)
+    combined = BatchNormalization()(combined)
+    combined = Dropout(0.4)(combined)
+    combined = Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001))(combined)
+    combined = Dropout(0.3)(combined)
+    combined = Dense(64, activation='relu')(combined)
+    combined = Dropout(0.2)(combined)
+    
+    # Capa de salida para la clasificación binaria
+    output = Dense(1, activation='sigmoid', name='output')(combined)
+    
+    # Crear y compilar el modelo
+    model = Model(
+        inputs=[bert_input, num_input],
+        outputs=output
+    )
+    
+    model.compile(
+        optimizer=Adam(learning_rate=LEARNING_RATE),
+        loss='binary_crossentropy',
+        metrics=['accuracy', tf.keras.metrics.AUC(name='auc'), 
+                tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
+    )
+    
+    return model
+
+def entrenar_modelo_balanceado(model, X_train, y_train, X_val, y_val, fine_tuning=False):
     """
     Entrena el modelo con balanceo de clases.
+    Soporta tanto el modelo tradicional como fine-tuning de BERT.
     """
     print("Calculando pesos de clase para balanceo...")
     
@@ -490,9 +591,9 @@ def entrenar_modelo_balanceado(model, X_train_bert, X_train_features, y_train,
     print("Entrenando el modelo con balanceo de clases...")
     
     history = model.fit(
-        [X_train_bert, X_train_features],
+        X_train,
         y_train,
-        validation_data=([X_val_bert, X_val_features], y_val),
+        validation_data=(X_val, y_val),
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
         class_weight=class_weight_dict,
@@ -502,14 +603,14 @@ def entrenar_modelo_balanceado(model, X_train_bert, X_train_features, y_train,
     
     return history
 
-def encontrar_umbral_optimo(model, X_val_bert, X_val_features, y_val):
+def encontrar_umbral_optimo(model, X_val, y_val):
     """
     Encuentra el umbral óptimo para la clasificación.
     """
     from sklearn.metrics import precision_recall_curve, f1_score
     
     # Obtener predicciones de probabilidad
-    y_pred_proba = model.predict([X_val_bert, X_val_features])
+    y_pred_proba = model.predict(X_val)
     
     # Calcular curva precision-recall
     precision, recall, thresholds = precision_recall_curve(y_val, y_pred_proba)
@@ -545,7 +646,18 @@ def predecir_fraude_mejorado(model, mensaje, remitente, umbral_optimo=0.5):
     bert_features = extraer_caracteristicas_bert(temp_df['mensaje'])
     
     # Realizar predicción
-    prediction = model.predict([bert_features, caracteristicas_numericas], verbose=0)[0][0]
+    if FINE_TUNE_BERT:
+        # Tokenizar para fine-tuning
+        tokens = tokenizer(
+            [str(mensaje)],
+            max_length=MAX_LENGTH,
+            padding='max_length',
+            truncation=True,
+            return_tensors='np'
+        )
+        prediction = model.predict([tokens['input_ids'], tokens['attention_mask'], caracteristicas_numericas], verbose=0)[0][0]
+    else:
+        prediction = model.predict([bert_features, caracteristicas_numericas], verbose=0)[0][0]
     
     # Determinar si es fraudulento basado en el umbral optimizado
     es_fraudulento = prediction >= umbral_optimo
@@ -576,7 +688,11 @@ def predecir_fraude_mejorado(model, mensaje, remitente, umbral_optimo=0.5):
         "contiene_verificacion": bool(temp_df['contiene_verificacion'].iloc[0]),
         "tiene_errores_ortograficos": bool(temp_df['tiene_errores_ortograficos'].iloc[0]),
         "menciona_servicio_conocido": bool(temp_df['menciona_servicio_conocido'].iloc[0]),
-        "sospecha_movil_fraudulento": bool(temp_df['sospecha_movil_fraudulento'].iloc[0])
+        "sospecha_movil_fraudulento": bool(temp_df['sospecha_movil_fraudulento'].iloc[0]),
+        "contiene_premio": bool(temp_df['contiene_premio'].iloc[0]),
+        "monto_grande": bool(temp_df['monto_grande'].iloc[0]),
+        "llamada_accion_sospechosa": bool(temp_df['llamada_accion_sospechosa'].iloc[0]),
+        "patron_estafa_premio": bool(temp_df['patron_estafa_premio'].iloc[0])
     }
     
     return {
@@ -587,14 +703,14 @@ def predecir_fraude_mejorado(model, mensaje, remitente, umbral_optimo=0.5):
         "factores_riesgo": factores_riesgo
     }
 
-def evaluar_modelo_detallado(model, X_test_bert, X_test_features, y_test, umbral_optimo):
+def evaluar_modelo_detallado(model, X_test, y_test, umbral_optimo):
     """
     Evaluación detallada del modelo con métricas adicionales.
     """
     from sklearn.metrics import classification_report, confusion_matrix
     
     # Predicciones con umbral optimizado
-    y_pred_proba = model.predict([X_test_bert, X_test_features])
+    y_pred_proba = model.predict(X_test)
     y_pred = (y_pred_proba >= umbral_optimo).astype(int)
     
     print("\n" + "="*50)
@@ -620,6 +736,326 @@ def evaluar_modelo_detallado(model, X_test_bert, X_test_features, y_test, umbral
     print(f"Sensibilidad (True Positive Rate): {sensitivity:.4f}")
     print(f"Falsos Positivos: {fp} de {tn + fp} legítimos ({fp/(tn+fp)*100:.1f}%)")
     print(f"Falsos Negativos: {fn} de {tp + fn} fraudulentos ({fn/(tp+fn)*100:.1f}%)")
+
+def generar_graficas_evaluacion(historia, model, X_test, y_test, umbral_optimo, nombre_archivo='resultados_modelo'):
+    """
+    Genera gráficas completas de evaluación del modelo.
+    
+    Parámetros:
+    - historia: Historia del entrenamiento
+    - model: Modelo entrenado
+    - X_test: Datos de prueba
+    - y_test: Etiquetas de prueba
+    - umbral_optimo: Umbral optimizado
+    - nombre_archivo: Nombre base para guardar las gráficas
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from sklearn.metrics import (confusion_matrix, roc_curve, auc, 
+                                 precision_recall_curve, classification_report,
+                                 f1_score, precision_score, recall_score)
+    import numpy as np
+    from datetime import datetime
+    
+    # Configurar estilo
+    plt.style.use('seaborn-v0_8-darkgrid')
+    sns.set_palette("husl")
+    
+    # Crear timestamp para los archivos
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Obtener predicciones
+    y_pred_proba = model.predict(X_test).flatten()
+    y_pred = (y_pred_proba >= umbral_optimo).astype(int)
+    
+    print("\n" + "="*70)
+    print("📊 GENERANDO GRÁFICAS DE EVALUACIÓN")
+    print("="*70)
+    
+    # ============================================================================
+    # 1. CURVAS DE ENTRENAMIENTO (Loss, Accuracy, AUC)
+    # ============================================================================
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    fig.suptitle('Curvas de Entrenamiento del Modelo', fontsize=16, fontweight='bold')
+    
+    # Loss
+    axes[0, 0].plot(historia.history['loss'], label='Entrenamiento', linewidth=2)
+    axes[0, 0].plot(historia.history['val_loss'], label='Validación', linewidth=2)
+    axes[0, 0].set_title('Pérdida (Loss)', fontsize=12, fontweight='bold')
+    axes[0, 0].set_xlabel('Época')
+    axes[0, 0].set_ylabel('Loss')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Accuracy
+    axes[0, 1].plot(historia.history['accuracy'], label='Entrenamiento', linewidth=2)
+    axes[0, 1].plot(historia.history['val_accuracy'], label='Validación', linewidth=2)
+    axes[0, 1].set_title('Precisión (Accuracy)', fontsize=12, fontweight='bold')
+    axes[0, 1].set_xlabel('Época')
+    axes[0, 1].set_ylabel('Accuracy')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # AUC
+    axes[1, 0].plot(historia.history['auc'], label='Entrenamiento', linewidth=2)
+    axes[1, 0].plot(historia.history['val_auc'], label='Validación', linewidth=2)
+    axes[1, 0].set_title('AUC (Area Under Curve)', fontsize=12, fontweight='bold')
+    axes[1, 0].set_xlabel('Época')
+    axes[1, 0].set_ylabel('AUC')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Precision y Recall
+    axes[1, 1].plot(historia.history['precision'], label='Precision (Train)', linewidth=2)
+    axes[1, 1].plot(historia.history['val_precision'], label='Precision (Val)', linewidth=2, linestyle='--')
+    axes[1, 1].plot(historia.history['recall'], label='Recall (Train)', linewidth=2)
+    axes[1, 1].plot(historia.history['val_recall'], label='Recall (Val)', linewidth=2, linestyle='--')
+    axes[1, 1].set_title('Precision y Recall', fontsize=12, fontweight='bold')
+    axes[1, 1].set_xlabel('Época')
+    axes[1, 1].set_ylabel('Valor')
+    axes[1, 1].legend()
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    filename = f'graficas_entrenamiento_{timestamp}.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"✓ Gráficas de entrenamiento guardadas: {filename}")
+    plt.close()
+    
+    # ============================================================================
+    # 2. MATRIZ DE CONFUSIÓN
+    # ============================================================================
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle('Matriz de Confusión', fontsize=16, fontweight='bold')
+    
+    cm = confusion_matrix(y_test, y_pred)
+    
+    # Matriz de confusión con valores absolutos
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[0],
+                xticklabels=['Legítimo', 'Fraudulento'],
+                yticklabels=['Legítimo', 'Fraudulento'],
+                cbar_kws={'label': 'Cantidad'})
+    axes[0].set_title('Valores Absolutos', fontsize=12, fontweight='bold')
+    axes[0].set_ylabel('Valor Real')
+    axes[0].set_xlabel('Predicción')
+    
+    # Matriz de confusión normalizada
+    cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    sns.heatmap(cm_norm, annot=True, fmt='.2%', cmap='Greens', ax=axes[1],
+                xticklabels=['Legítimo', 'Fraudulento'],
+                yticklabels=['Legítimo', 'Fraudulento'],
+                cbar_kws={'label': 'Porcentaje'})
+    axes[1].set_title('Valores Normalizados', fontsize=12, fontweight='bold')
+    axes[1].set_ylabel('Valor Real')
+    axes[1].set_xlabel('Predicción')
+    
+    plt.tight_layout()
+    filename = f'matriz_confusion_{timestamp}.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"✓ Matriz de confusión guardada: {filename}")
+    plt.close()
+    
+    # ============================================================================
+    # 3. CURVA ROC
+    # ============================================================================
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    fpr, tpr, thresholds_roc = roc_curve(y_test, y_pred_proba)
+    roc_auc = auc(fpr, tpr)
+    
+    ax.plot(fpr, tpr, color='darkorange', lw=2, 
+            label=f'Curva ROC (AUC = {roc_auc:.4f})')
+    ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Clasificador Aleatorio')
+    
+    # Marcar el punto del umbral óptimo
+    idx_optimal = np.argmin(np.abs(thresholds_roc - umbral_optimo))
+    ax.plot(fpr[idx_optimal], tpr[idx_optimal], 'ro', markersize=10, 
+            label=f'Umbral Óptimo ({umbral_optimo:.3f})')
+    
+    ax.set_xlim([0.0, 1.0])
+    ax.set_ylim([0.0, 1.05])
+    ax.set_xlabel('Tasa de Falsos Positivos (FPR)', fontsize=12)
+    ax.set_ylabel('Tasa de Verdaderos Positivos (TPR)', fontsize=12)
+    ax.set_title('Curva ROC (Receiver Operating Characteristic)', fontsize=14, fontweight='bold')
+    ax.legend(loc="lower right", fontsize=10)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    filename = f'curva_roc_{timestamp}.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"✓ Curva ROC guardada: {filename}")
+    plt.close()
+    
+    # ============================================================================
+    # 4. CURVA PRECISION-RECALL
+    # ============================================================================
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    precision, recall, thresholds_pr = precision_recall_curve(y_test, y_pred_proba)
+    pr_auc = auc(recall, precision)
+    
+    ax.plot(recall, precision, color='blue', lw=2, 
+            label=f'Curva PR (AUC = {pr_auc:.4f})')
+    
+    # Línea base (proporción de positivos)
+    baseline = np.sum(y_test) / len(y_test)
+    ax.plot([0, 1], [baseline, baseline], color='red', lw=2, linestyle='--', 
+            label=f'Baseline ({baseline:.2f})')
+    
+    # Marcar el punto del umbral óptimo
+    if len(thresholds_pr) > 0:
+        idx_optimal = np.argmin(np.abs(thresholds_pr - umbral_optimo))
+        ax.plot(recall[idx_optimal], precision[idx_optimal], 'ro', markersize=10, 
+                label=f'Umbral Óptimo ({umbral_optimo:.3f})')
+    
+    ax.set_xlim([0.0, 1.0])
+    ax.set_ylim([0.0, 1.05])
+    ax.set_xlabel('Recall (Sensibilidad)', fontsize=12)
+    ax.set_ylabel('Precision', fontsize=12)
+    ax.set_title('Curva Precision-Recall', fontsize=14, fontweight='bold')
+    ax.legend(loc="lower left", fontsize=10)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    filename = f'curva_precision_recall_{timestamp}.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"✓ Curva Precision-Recall guardada: {filename}")
+    plt.close()
+    
+    # ============================================================================
+    # 5. MÉTRICAS POR CLASE (F1, Precision, Recall)
+    # ============================================================================
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Calcular métricas por clase
+    report = classification_report(y_test, y_pred, target_names=['Legítimo', 'Fraudulento'], 
+                                   output_dict=True)
+    
+    clases = ['Legítimo', 'Fraudulento']
+    metricas = ['precision', 'recall', 'f1-score']
+    
+    x = np.arange(len(clases))
+    width = 0.25
+    
+    for i, metrica in enumerate(metricas):
+        valores = [report[clase][metrica] for clase in clases]
+        ax.bar(x + i*width, valores, width, label=metrica.capitalize())
+        
+        # Agregar valores en las barras
+        for j, v in enumerate(valores):
+            ax.text(j + i*width, v + 0.02, f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+    
+    ax.set_ylabel('Valor', fontsize=12)
+    ax.set_title('Métricas por Clase', fontsize=14, fontweight='bold')
+    ax.set_xticks(x + width)
+    ax.set_xticklabels(clases)
+    ax.legend()
+    ax.set_ylim([0, 1.1])
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    filename = f'metricas_por_clase_{timestamp}.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"✓ Métricas por clase guardadas: {filename}")
+    plt.close()
+    
+    # ============================================================================
+    # 6. DISTRIBUCIÓN DE PROBABILIDADES
+    # ============================================================================
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Separar probabilidades por clase real
+    prob_legitimos = y_pred_proba[y_test == 0]
+    prob_fraudulentos = y_pred_proba[y_test == 1]
+    
+    ax.hist(prob_legitimos, bins=50, alpha=0.6, label='Legítimos', color='green', edgecolor='black')
+    ax.hist(prob_fraudulentos, bins=50, alpha=0.6, label='Fraudulentos', color='red', edgecolor='black')
+    ax.axvline(x=umbral_optimo, color='blue', linestyle='--', linewidth=2, 
+               label=f'Umbral Óptimo ({umbral_optimo:.3f})')
+    
+    ax.set_xlabel('Probabilidad de Fraude', fontsize=12)
+    ax.set_ylabel('Frecuencia', fontsize=12)
+    ax.set_title('Distribución de Probabilidades Predichas', fontsize=14, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    filename = f'distribucion_probabilidades_{timestamp}.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"✓ Distribución de probabilidades guardada: {filename}")
+    plt.close()
+    
+    # ============================================================================
+    # 7. RESUMEN DE MÉTRICAS
+    # ============================================================================
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.axis('off')
+    
+    # Calcular todas las métricas
+    tn, fp, fn, tp = cm.ravel()
+    accuracy = (tp + tn) / (tp + tn + fp + fn)
+    precision_val = precision_score(y_test, y_pred)
+    recall_val = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    specificity = tn / (tn + fp)
+    
+    # Crear tabla de métricas
+    metricas_texto = f"""
+    ╔══════════════════════════════════════════════════════════════╗
+    ║           RESUMEN DE MÉTRICAS DEL MODELO                     ║
+    ╚══════════════════════════════════════════════════════════════╝
+    
+    📊 MÉTRICAS GENERALES:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    • Accuracy:              {accuracy:.4f} ({accuracy*100:.2f}%)
+    • Precision:             {precision_val:.4f} ({precision_val*100:.2f}%)
+    • Recall (Sensibilidad): {recall_val:.4f} ({recall_val*100:.2f}%)
+    • F1-Score:              {f1:.4f}
+    • Specificity:           {specificity:.4f} ({specificity*100:.2f}%)
+    • AUC-ROC:               {roc_auc:.4f}
+    • AUC-PR:                {pr_auc:.4f}
+    
+    🎯 MATRIZ DE CONFUSIÓN:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    • Verdaderos Negativos:  {tn:4d}  (Legítimos correctos)
+    • Falsos Positivos:      {fp:4d}  (Legítimos mal clasificados)
+    • Falsos Negativos:      {fn:4d}  (Fraudes no detectados)
+    • Verdaderos Positivos:  {tp:4d}  (Fraudes detectados)
+    
+    ⚠️  TASAS DE ERROR:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    • Tasa de Falsos Positivos:  {fp/(tn+fp)*100:.2f}%
+    • Tasa de Falsos Negativos:  {fn/(tp+fn)*100:.2f}%
+    
+    🔧 CONFIGURACIÓN:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    • Umbral Óptimo:         {umbral_optimo:.4f}
+    • Épocas entrenadas:     {len(historia.history['loss'])}
+    • Características:       23 (19 originales + 4 nuevas)
+    """
+    
+    ax.text(0.1, 0.5, metricas_texto, fontsize=11, family='monospace',
+            verticalalignment='center', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    filename = f'resumen_metricas_{timestamp}.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"✓ Resumen de métricas guardado: {filename}")
+    plt.close()
+    
+    print("\n" + "="*70)
+    print("✅ TODAS LAS GRÁFICAS GENERADAS EXITOSAMENTE")
+    print("="*70)
+    print(f"\nArchivos guardados con timestamp: {timestamp}")
+    print("\nGráficas generadas:")
+    print(f"  1. graficas_entrenamiento_{timestamp}.png")
+    print(f"  2. matriz_confusion_{timestamp}.png")
+    print(f"  3. curva_roc_{timestamp}.png")
+    print(f"  4. curva_precision_recall_{timestamp}.png")
+    print(f"  5. metricas_por_clase_{timestamp}.png")
+    print(f"  6. distribucion_probabilidades_{timestamp}.png")
+    print(f"  7. resumen_metricas_{timestamp}.png")
+
 
 def principal_mejorado(ruta_archivo, guardar=True):
     """
@@ -678,19 +1114,39 @@ def principal_mejorado(ruta_archivo, guardar=True):
     print("\n🎓 PASO 6/7: Entrenando el modelo...")
     print("  (Esto puede tardar bastante tiempo dependiendo de tu hardware)")
     # Entrenar el modelo con balanceo
-    historia = entrenar_modelo_balanceado(
-        modelo, 
-        X_train_bert, X_train_num, y_train,
-        X_val_bert, X_val_num, y_val
-    )
+    if FINE_TUNE_BERT:
+        historia = entrenar_modelo_balanceado(
+            modelo, 
+            [X_train_ids, X_train_mask, X_train_num], y_train,
+            [X_val_ids, X_val_mask, X_val_num], y_val,
+            fine_tuning=True
+        )
+    else:
+        historia = entrenar_modelo_balanceado(
+            modelo, 
+            [X_train_bert, X_train_num], y_train,
+            [X_val_bert, X_val_num], y_val
+        )
     
     print("\n🎯 PASO 7/7: Optimizando umbral de clasificación...")
     # Encontrar umbral óptimo
-    umbral_optimo = encontrar_umbral_optimo(modelo, X_val_bert, X_val_num, y_val)
+    if FINE_TUNE_BERT:
+        umbral_optimo = encontrar_umbral_optimo(modelo, [X_val_ids, X_val_mask, X_val_num], y_val)
+    else:
+        umbral_optimo = encontrar_umbral_optimo(modelo, [X_val_bert, X_val_num], y_val)
     
     print("\n📈 Evaluando modelo en conjunto de prueba...")
     # Evaluación detallada
-    evaluar_modelo_detallado(modelo, X_test_bert, X_test_num, y_test, umbral_optimo)
+    if FINE_TUNE_BERT:
+        evaluar_modelo_detallado(modelo, [X_test_ids, X_test_mask, X_test_num], y_test, umbral_optimo)
+        X_test_final = [X_test_ids, X_test_mask, X_test_num]
+    else:
+        evaluar_modelo_detallado(modelo, [X_test_bert, X_test_num], y_test, umbral_optimo)
+        X_test_final = [X_test_bert, X_test_num]
+    
+    # Generar gráficas de evaluación
+    print("\n📊 Generando gráficas de evaluación...")
+    generar_graficas_evaluacion(historia, modelo, X_test_final, y_test, umbral_optimo)
     
     # Guardar el modelo si se solicita
     if guardar:
@@ -763,6 +1219,6 @@ def principal_mejorado(ruta_archivo, guardar=True):
 
 # Ejemplo de uso
 if __name__ == "__main__":
-    # Reemplazar con la ruta real del archivo (Excel o TXT)
-    ruta_archivo = "datos_sms.txt"  # También funciona con "datos_sms.xlsx"
+    # Archivo de datos (CSV recomendado para mejor compatibilidad)
+    ruta_archivo = "datos_sms.csv"  # También funciona con "datos_sms.xlsx"
     modelo, umbral_optimo = principal_mejorado(ruta_archivo)

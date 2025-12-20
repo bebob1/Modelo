@@ -41,6 +41,15 @@ ENV/
 *.log
 entrenamiento_*.log
 
+# Gráficas generadas
+graficas_entrenamiento_*.png
+matriz_confusion_*.png
+curva_roc_*.png
+curva_precision_recall_*.png
+metricas_por_clase_*.png
+distribucion_probabilidades_*.png
+resumen_metricas_*.png
+
 # Backups
 *_backup.py
 *_antes_cambios.py
@@ -49,6 +58,7 @@ modelo2_backup.py
 # Scripts temporales
 aplicar_cambios*.py
 aplicar_cambios*.sh
+generar_graficas.py
 
 # OS
 .DS_Store
