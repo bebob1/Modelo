@@ -167,8 +167,11 @@ class SmishingPredictor:
             attention_mask=tokens['attention_mask']
         )
         
-        # Retornar pooled output
-        return outputs.pooler_output.numpy()
+        # Usar el token CLS del último hidden state en lugar de pooler_output.
+        # El pooler se re-inicializa aleatoriamente al cargar el checkpoint (warning HuggingFace),
+        # mientras que el encoder (last_hidden_state) carga los pesos originales correctamente.
+        # last_hidden_state[:, 0, :] equivale al token [CLS] → representación global del texto.
+        return outputs.last_hidden_state[:, 0, :].numpy()
     
     def _obtener_factores_riesgo(self, mensaje: str, remitente: str) -> List[str]:
         """
