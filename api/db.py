@@ -6,17 +6,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def get_connection():
-    """Crea y retorna una conexión a la base de datos MySQL.
-    
-    El puerto se lee de PORT (o DB_PORT como fallback), según el .env del proyecto.
-    """
-    mysql_port = int(os.getenv("PORT") or os.getenv("DB_PORT") or 3306)
+    """Crea y retorna una conexión a la base de datos MySQL."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
         database=os.getenv("DB_NAME"),
-        port=mysql_port
+        port=int(os.getenv("DB_PORT", 3306))
     )
 
 

@@ -36,20 +36,19 @@ cp .env.example .env
 Contenido del `.env`:
 
 ```env
+# Puerto donde se expone la API
+PORT=6000
+
 # Base de datos MySQL
 DB_HOST=localhost
 DB_USER=tu_usuario
 DB_PASSWORD=tu_contraseña
 DB_NAME=modelo
-PORT=3306       # Puerto de conexión a MySQL
-DB_PORT=3306    # Alias alternativo
+DB_PORT=3306    # Puerto de conexión a MySQL
 
 # Autenticación — token fijo para el header X-API-Key
 API_KEY=smishing-secret-token-2024
 ```
-
-> **Nota:** `PORT` y `DB_PORT` son el puerto de **MySQL**, no el de la API.
-> La API siempre se expone en el **puerto 6000** (sin configuración adicional).
 
 > ⚠️ **Nunca subas el `.env` a un repositorio.** Usa `.env.example` como plantilla.
 
