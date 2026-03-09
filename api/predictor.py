@@ -127,14 +127,15 @@ class SmishingPredictor:
             (features['contiene_url'] == 1 or features['llamada_accion_sospechosa'] == 1)
         ) else 0
         
-        # Convertir a array en el orden correcto
+        # Convertir a array en el orden EXACTO usado durante el entrenamiento (modelo2.py)
         feature_names = [
             'mensaje_longitud', 'mensaje_palabras', 'mensaje_mayusculas_ratio', 'mensaje_caracteres_especiales',
-            'remitente_longitud', 'remitente_es_numerico', 'remitente_tiene_letras', 'remitente_empieza_3',
-            'remitente_numero_corto', 'remitente_movil_estandar', 'remitente_longitud_anormal',
-            'contiene_url', 'contiene_urgencia', 'contiene_dinero', 'contiene_banco', 'contiene_verificacion',
-            'menciona_servicio_conocido', 'tiene_errores_ortograficos', 'llamada_accion_sospechosa',
-            'sospecha_movil_fraudulento', 'contiene_premio', 'monto_grande', 'patron_estafa_premio'
+            'remitente_longitud', 'remitente_es_numerico', 'remitente_tiene_letras',
+            'remitente_empieza_3', 'remitente_numero_corto', 'remitente_movil_estandar', 'remitente_longitud_anormal',
+            'contiene_url', 'contiene_urgencia', 'contiene_dinero', 'contiene_banco',
+            'contiene_verificacion', 'menciona_servicio_conocido', 'tiene_errores_ortograficos',
+            'sospecha_movil_fraudulento', 'contiene_premio', 'monto_grande', 'llamada_accion_sospechosa',
+            'patron_estafa_premio'
         ]
         
         return np.array([[features[name] for name in feature_names]], dtype=np.float32)
@@ -252,7 +253,8 @@ class SmishingPredictor:
             
             # Predecir
             print(f"Realizando predicción...")
-            probabilidad = float(self.model.predict([bert_features, num_features], verbose=0)[0][0])
+            raw_output = self.model.predict([bert_features, num_features], verbose=0)
+            probabilidad = float(raw_output.flatten()[0])
             es_fraudulento = probabilidad >= self.threshold
             
             # Nivel de confianza
