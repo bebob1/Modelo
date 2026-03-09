@@ -1,70 +1,123 @@
 # 🚀 API de Detección de Smishing
 
 API REST para detectar mensajes SMS fraudulentos usando el modelo entrenado de BERT.
+Los mensajes clasificados como fraudulentos se guardan automáticamente en la base de datos MySQL.
 
 ## 📋 Características
 
 - ✅ Endpoint `/predict` para detectar smishing
 - ✅ Retorna probabilidad de fraude y factores de riesgo
+- ✅ **Guarda mensajes fraudulentos en MySQL automáticamente**
+- ✅ **Autenticación por API Key** (`X-API-Key`)
 - ✅ Usa el modelo `.keras` entrenado
 - ✅ Documentación interactiva (Swagger UI)
 - ✅ Respuestas en JSON
 
-## 🚀 Instalación
+---
 
-### 1. Instalar Dependencias
+## ⚙️ Configuración
+
+### 1. Archivos del Modelo
+
+Asegúrate de que existan estos archivos en la carpeta padre:
+```
+../modelo_detector_smishing_mejorado.keras
+../umbral_optimo.npy
+```
+
+### 2. Variables de entorno
+
+Copia el archivo de ejemplo y completa tus valores reales:
+
+```bash
+cp .env.example .env
+```
+
+Contenido del `.env`:
+
+```env
+# Base de datos MySQL
+DB_HOST=localhost
+DB_USER=tu_usuario
+DB_PASSWORD=tu_contraseña
+DB_NAME=modelo
+PORT=3306       # Puerto de conexión a MySQL
+DB_PORT=3306    # Alias alternativo
+
+# Autenticación — token fijo para el header X-API-Key
+API_KEY=smishing-secret-token-2024
+```
+
+> **Nota:** `PORT` y `DB_PORT` son el puerto de **MySQL**, no el de la API.
+> La API siempre se expone en el **puerto 6000** (sin configuración adicional).
+
+> ⚠️ **Nunca subas el `.env` a un repositorio.** Usa `.env.example` como plantilla.
+
+### 3. Instalar Dependencias
 
 ```bash
 cd api
 pip install -r requirements.txt
 ```
 
-### 2. Verificar Archivos del Modelo
+---
 
-Asegúrate de que existan estos archivos en la carpeta padre:
-- `../modelo_detector_smishing_mejorado.keras`
-- `../umbral_optimo.npy`
-
-## 🎯 Uso
-
-### Iniciar el Servidor
+## 🚀 Iniciar el Servidor
 
 ```bash
-cd api
-uvicorn main:app --reload
+uvicorn main:app --reload --port 3000
 ```
 
-O directamente:
+O directamente con Python:
 
 ```bash
 python main.py
 ```
 
-El servidor estará disponible en: `http://localhost:8000`
+El servidor estará disponible en: `http://localhost:6000`
 
-### Endpoints Disponibles
+---
 
-- **GET /** - Información de la API
-- **GET /health** - Estado del servidor
-- **POST /predict** - Detectar smishing
-- **GET /docs** - Documentación interactiva (Swagger UI)
-- **GET /redoc** - Documentación alternativa
+## 🔑 Autenticación
+
+Todos los endpoints protegidos requieren el header **`X-API-Key`** con el token configurado en tu `.env`.
+
+| Header | Valor |
+|--------|-------|
+| `X-API-Key` | El valor de `API_KEY` en tu `.env` |
+
+Si el token es inválido o no se incluye, la API responde con `401 Unauthorized`.
+
+---
+
+## 📡 Endpoints
+
+| Método | Ruta | Auth | Descripción |
+|--------|------|------|-------------|
+| `GET` | `/` | ❌ | Información general de la API |
+| `GET` | `/health` | ✅ | Estado del servidor y modelo |
+| `POST` | `/predict` | ✅ | Detectar si un SMS es fraudulento |
+| `GET` | `/docs` | ❌ | Documentación interactiva (Swagger UI) |
+| `GET` | `/redoc` | ❌ | Documentación alternativa (ReDoc) |
+
+---
 
 ## 📡 Ejemplos de Uso
 
-### 1. Con curl
+### 1. curl
 
 **Mensaje Fraudulento:**
 ```bash
-curl -X POST "http://localhost:8000/predict" \
+curl -X POST "http://localhost:6000/predict" \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: smishing-secret-token-2024" \
   -d '{
     "mensaje": "Ganaste un premio de $5.000.000! Haz clic aquí: bit.ly/premio123",
     "remitente": "3209876543"
   }'
 ```
 
-**Respuesta:**
+**Respuesta (fraudulento — guardado en BD):**
 ```json
 {
   "es_fraudulento": true,
@@ -73,83 +126,118 @@ curl -X POST "http://localhost:8000/predict" \
   "factores_riesgo": [
     "remitente_es_numerico",
     "remitente_empieza_3",
-    "remitente_movil_estandar",
     "contiene_dinero",
     "contiene_url",
-    "sospecha_movil_fraudulento",
-    "contiene_premio",
-    "monto_grande",
-    "llamada_accion_sospechosa",
     "patron_estafa_premio"
-  ]
+  ],
+  "mensaje_resultado": "⚠️ El mensaje es fraudulento y ha sido guardado exitosamente en la base de datos con ID 42.",
+  "id_registro": 42
 }
 ```
 
 **Mensaje Legítimo:**
 ```bash
-curl -X POST "http://localhost:8000/predict" \
+curl -X POST "http://localhost:6000/predict" \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: smishing-secret-token-2024" \
   -d '{
     "mensaje": "Tu pedido de DiDi Food está en camino. Llegará en 15 minutos.",
     "remitente": "DiDi"
   }'
 ```
 
-**Respuesta:**
+**Respuesta (legítimo — NO se guarda en BD):**
 ```json
 {
   "es_fraudulento": false,
   "probabilidad_fraude": 0.0472,
   "nivel_confianza": "Muy probablemente legítimo",
-  "factores_riesgo": [
-    "menciona_servicio_conocido"
-  ]
+  "factores_riesgo": ["menciona_servicio_conocido"],
+  "mensaje_resultado": "✅ El mensaje no presenta indicios de fraude.",
+  "id_registro": null
 }
 ```
 
-### 2. Con Python (requests)
+**Token inválido:**
+```bash
+curl -X POST "http://localhost:6000/predict" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: token-incorrecto" \
+  -d '{"mensaje": "Hola", "remitente": "123"}'
+```
+
+```json
+{
+  "detail": "API Key inválida o no proporcionada. Incluye el header 'X-API-Key'."
+}
+```
+
+---
+
+### 2. Python (requests)
 
 ```python
 import requests
 
-url = "http://localhost:8000/predict"
+BASE_URL = "http://localhost:6000"
+HEADERS = {
+    "Content-Type": "application/json",
+    "X-API-Key": "smishing-secret-token-2024"   # ← tu API_KEY del .env
+}
+
 data = {
     "mensaje": "URGENTE: Confirme sus datos bancarios en www.banco-falso.co",
     "remitente": "3001234567"
 }
 
-response = requests.post(url, json=data)
-print(response.json())
+response = requests.post(f"{BASE_URL}/predict", json=data, headers=HEADERS)
+resultado = response.json()
+
+print(resultado["mensaje_resultado"])
+if resultado["es_fraudulento"]:
+    print(f"  → Guardado en BD con ID: {resultado['id_registro']}")
 ```
 
-### 3. Con JavaScript (fetch)
+---
+
+### 3. JavaScript (fetch)
 
 ```javascript
-const url = "http://localhost:8000/predict";
+const BASE_URL = "http://localhost:6000";
+const API_KEY  = "smishing-secret-token-2024"; // tu API_KEY del .env
+
 const data = {
   mensaje: "Ganaste $5.000.000! Haz clic aquí",
   remitente: "3209876543"
 };
 
-fetch(url, {
+fetch(`${BASE_URL}/predict`, {
   method: "POST",
   headers: {
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "X-API-Key": API_KEY
   },
   body: JSON.stringify(data)
 })
-.then(response => response.json())
-.then(data => console.log(data));
+  .then(res => res.json())
+  .then(result => {
+    console.log(result.mensaje_resultado);
+    if (result.es_fraudulento) {
+      console.log("ID en BD:", result.id_registro);
+    }
+  });
 ```
 
-## 📊 Formato de Request/Response
+---
 
-### Request (POST /predict)
+## 📊 Formato de Request / Response
+
+### Request — `POST /predict`
 
 ```json
 {
-  "mensaje": "string (requerido, min 1 carácter)",
-  "remitente": "string (requerido, min 1 carácter)"
+  "mensaje": "string  (requerido, mínimo 1 carácter)",
+  "remitente": "string  (requerido, mínimo 1 carácter)"
 }
 ```
 
@@ -158,124 +246,127 @@ fetch(url, {
 ```json
 {
   "es_fraudulento": "boolean",
-  "probabilidad_fraude": "float (0.0 - 1.0)",
+  "probabilidad_fraude": "float  (0.0 – 1.0)",
   "nivel_confianza": "string",
-  "factores_riesgo": ["string", ...]
+  "factores_riesgo": ["string", "..."],
+  "mensaje_resultado": "string  — descripción amigable del resultado",
+  "id_registro": "int | null  — ID en BD si es fraudulento, null si no"
 }
 ```
 
 **Niveles de confianza:**
-- `"Muy probablemente fraudulento"` - probabilidad >= 0.8
-- `"Probablemente fraudulento"` - probabilidad >= 0.6
-- `"Incierto"` - probabilidad >= 0.4
-- `"Probablemente legítimo"` - probabilidad >= 0.2
-- `"Muy probablemente legítimo"` - probabilidad < 0.2
+
+| Rango de probabilidad | Nivel |
+|---|---|
+| ≥ 0.80 | `"Muy probablemente fraudulento"` |
+| ≥ 0.60 | `"Probablemente fraudulento"` |
+| ≥ 0.40 | `"Incierto"` |
+| ≥ 0.20 | `"Probablemente legítimo"` |
+| < 0.20 | `"Muy probablemente legítimo"` |
+
+---
+
+## 🗄️ Base de Datos
+
+Cuando un mensaje es clasificado como **fraudulento**, se insertan registros en:
+
+| Tabla | Qué se guarda |
+|---|---|
+| `messages` | Cuerpo del mensaje, `detection_score` (probabilidad × 100), `received_at` |
+| `phone_number` | Número remitente; si ya existe, incrementa `fraud_count` |
+| `phone_number_message` | Relación entre el número y el mensaje |
+
+---
 
 ## 🔍 Factores de Riesgo
 
-La API puede detectar los siguientes factores:
-
 **Remitente:**
-- `remitente_es_numerico`
-- `remitente_empieza_3`
-- `remitente_movil_estandar`
-- `remitente_numero_corto`
-- `remitente_longitud_anormal`
+- `remitente_es_numerico`, `remitente_empieza_3`, `remitente_movil_estandar`
+- `remitente_numero_corto`, `remitente_longitud_anormal`
 
 **Contenido:**
-- `contiene_url`
-- `contiene_urgencia`
-- `contiene_dinero`
-- `contiene_banco`
-- `contiene_verificacion`
-- `menciona_servicio_conocido`
-- `tiene_errores_ortograficos`
-- `contiene_premio`
-- `monto_grande`
+- `contiene_url`, `contiene_urgencia`, `contiene_dinero`, `contiene_banco`
+- `contiene_verificacion`, `menciona_servicio_conocido`
+- `tiene_errores_ortograficos`, `contiene_premio`, `monto_grande`
 - `llamada_accion_sospechosa`
 
-**Patrones Combinados:**
+**Patrones combinados:**
 - `sospecha_movil_fraudulento` ⭐
 - `patron_estafa_premio` ⭐
 
-## 🧪 Testing
+---
 
-Ejecutar script de prueba:
+## 🧪 Testing
 
 ```bash
 python test_api.py
 ```
 
+> Si el script usa la API sin el header `X-API-Key`, actualízalo para incluirlo.
+
+---
+
 ## 📝 Documentación Interactiva
 
 Una vez iniciado el servidor, visita:
 
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
+- **Swagger UI**: http://localhost:6000/docs
+- **ReDoc**: http://localhost:6000/redoc
 
-Aquí puedes probar la API directamente desde el navegador.
+Desde Swagger UI puedes autenticarte haciendo clic en el botón **🔒 Authorize** e ingresando tu `API_KEY`.
 
-## ⚙️ Configuración
-
-### Cambiar Puerto
-
-```bash
-uvicorn main:app --port 8080
-```
-
-### Modo Producción
-
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-### Con Gunicorn (Producción)
-
-```bash
-pip install gunicorn
-gunicorn main:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
-```
+---
 
 ## 🐛 Solución de Problemas
 
-### Error: "Modelo no cargado"
+### `401 Unauthorized`
+El header `X-API-Key` no fue enviado o el valor no coincide con `API_KEY` en tu `.env`.
 
-Verifica que existan los archivos:
+### `503 — Error al guardar en la base de datos`
+Verifica que:
+- El `.env` tenga los datos de conexión correctos (`DB_HOST`, `DB_USER`, etc.)
+- MySQL esté corriendo y la base de datos `modelo` exista
+
+### `503 — Modelo no cargado`
+Verifica que existan:
 ```bash
 ls -la ../modelo_detector_smishing_mejorado.keras
 ls -la ../umbral_optimo.npy
 ```
 
-### Error: "No module named 'tensorflow'"
-
-Instala las dependencias:
+### `No module named 'tensorflow'` / `No module named 'mysql'`
 ```bash
 pip install -r requirements.txt
 ```
 
-### API muy lenta en primera predicción
-
-Es normal. BERT se carga en la primera predicción (~10-15 segundos). Las siguientes son rápidas (~0.5-1 segundo).
-
-## 📊 Performance
-
-- **Primera predicción**: ~10-15 segundos (carga BERT)
-- **Predicciones siguientes**: ~0.5-1 segundo
-- **Memoria**: ~500 MB RAM
-- **Modelo**: ~3.4 MB
-
-## 🔒 Seguridad
-
-Para producción, considera:
-- Agregar autenticación (API keys, JWT)
-- Rate limiting
-- CORS configurado correctamente
-- HTTPS
-
-## 📄 Licencia
-
-Parte del proyecto de tesis - Detección de Smishing
+### Primera predicción lenta
+Normal. BERT tarda ~10–15 s en cargarse. Las siguientes son rápidas (~0.5–1 s).
 
 ---
 
-**Última actualización**: Diciembre 2024
+## 📊 Performance
+
+| Métrica | Valor |
+|---|---|
+| Primera predicción | ~10–15 s (carga BERT) |
+| Predicciones siguientes | ~0.5–1 s |
+| Memoria | ~500 MB RAM |
+| Tamaño del modelo | ~3.4 MB |
+
+---
+
+## 🔒 Seguridad
+
+- **API Key fija** configurada en `.env` → header `X-API-Key`
+- Para producción considera: rate limiting, HTTPS, rotar el token periódicamente
+- Nunca expongas el `.env` ni el token en el código fuente
+
+---
+
+## 📄 Licencia
+
+Parte del proyecto de tesis — Detección de Smishing
+
+---
+
+**Última actualización**: Marzo 2026
