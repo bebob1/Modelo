@@ -229,37 +229,91 @@ class SmishingPredictor:
         
         return factores
     
+    def _score_reglas(self, mensaje: str, remitente: str) -> float:
+        """
+        Score de riesgo determinístico basado en las features numéricas.
+        
+        Las reglas detectan combinaciones de señales de alto riesgo que el
+        modelo BERT (sin fine-tuning) puede pasar por alto.
+        Retorna un valor entre 0.0 y 0.95.
+        """
+        import re
+        msg_l = str(mensaje).lower()
+        rem   = str(remitente)
+
+        # --- Extraer indicadores ---
+        url      = 1 if re.search(r'http[s]?://|www\.|\.com|\.org|bit\.ly|\.co\b', msg_l) else 0
+        urgencia = 1 if any(w in msg_l for w in ['urgente','expira','vence','inmediatamente','solo hoy']) else 0
+        dinero   = 1 if any(w in msg_l for w in ['$','pesos','dinero','gratis','premio','ganador']) else 0
+        banco    = 1 if any(w in msg_l for w in ['banco','cuenta','tarjeta','crédito','débito']) else 0
+        verif    = 1 if any(w in msg_l for w in ['verificar','confirmar','validar','bloqueo','suspendido','bloqueada','reactivar']) else 0
+        servicio = 1 if any(w in msg_l for w in ['didi','uber','rappi','bancolombia','davivienda','nequi','daviplata']) else 0
+        premio   = 1 if any(w in msg_l for w in ['ganaste','premio','sorteo','lotería','felicitaciones']) else 0
+        monto    = 1 if re.search(r'\$\s*[1-9]\d{5,}|\d{1,3}(?:[.,]\d{3}){2,}', str(mensaje)) else 0
+        llamada  = 1 if any(w in msg_l for w in ['haz clic','click','ingresa','ingrese','visita','entra','descarga']) else 0
+
+        empieza3 = 1 if rem.startswith('3') and rem.isdigit() else 0
+        sospecha = 1 if empieza3 and (url or verif) else 0
+        patron   = 1 if (premio or monto) and (url or llamada) else 0
+
+        # Si es un servicio conocido y legítimo → riesgo mínimo
+        if servicio and not sospecha:
+            return max(0.0, 0.1 * (url + urgencia + verif) - 0.1)
+
+        # ---Señales críticas (combinaciones muy sospechosas) ---
+        señales_criticas = patron + sospecha + int(bool(url and (dinero or verif or urgencia)))
+
+        # --- Señales de apoyo ---
+        señales_apoyo = premio + monto + llamada + verif + urgencia + banco
+
+        # --- Tabla de decisión ---
+        if señales_criticas >= 2:
+            return 0.95
+        elif señales_criticas >= 1 and señales_apoyo >= 2:
+            return 0.90
+        elif señales_criticas >= 1 and señales_apoyo >= 1:
+            return 0.78
+        elif señales_apoyo >= 4:
+            return 0.65
+        elif señales_apoyo >= 2:
+            return 0.35
+        return 0.0
+
     def predict(self, mensaje: str, remitente: str) -> Dict:
         """
-        Predice si un mensaje es fraudulento.
+        Predice si un mensaje SMS es fraudulento.
+
+        Usa un sistema híbrido:
+          1. Modelo BERT + clasificador neuronal (generaliza semántica)
+          2. Score de reglas sobre features numéricas (determinístico, robusto)
         
-        Args:
-            mensaje: Texto del SMS
-            remitente: Número o nombre del remitente
-            
-        Returns:
-            Diccionario con:
-                - es_fraudulento: bool
-                - probabilidad_fraude: float (0-1)
-                - nivel_confianza: str
-                - factores_riesgo: List[str]
+        La probabilidad final es max(bert_score, rule_score), de modo que
+        patrones obvios de fraude siempre sean detectados.
         """
         try:
-            # Extraer características
             print(f"Extrayendo características BERT...")
             bert_features = self._extraer_bert_features(mensaje)
             print(f"BERT features shape: {bert_features.shape}")
-            
+
             print(f"Extrayendo características numéricas...")
             num_features = self._extraer_caracteristicas_numericas(mensaje, remitente)
             print(f"Num features shape: {num_features.shape}")
-            
-            # Predecir
-            print(f"Realizando predicción...")
-            raw_output = self.model.predict([bert_features, num_features], verbose=0)
-            probabilidad = float(raw_output.flatten()[0])
+
+            # Score del modelo BERT
+            print(f"Realizando predicción (modelo)...")
+            raw_output     = self.model.predict([bert_features, num_features], verbose=0)
+            prob_bert      = float(raw_output.flatten()[0])
+            print(f"  → prob_bert: {prob_bert:.4f}")
+
+            # Score de reglas determinístico
+            prob_reglas = self._score_reglas(mensaje, remitente)
+            print(f"  → prob_reglas: {prob_reglas:.4f}")
+
+            # Combinación: tomar el mayor de los dos scores
+            probabilidad   = max(prob_bert, prob_reglas)
             es_fraudulento = probabilidad >= self.threshold
-            
+            print(f"  → prob_final: {probabilidad:.4f}  (umbral={self.threshold:.4f})")
+
             # Nivel de confianza
             if probabilidad >= 0.8:
                 nivel = "Muy probablemente fraudulento"
@@ -271,10 +325,10 @@ class SmishingPredictor:
                 nivel = "Probablemente legítimo"
             else:
                 nivel = "Muy probablemente legítimo"
-            
+
             # Factores de riesgo
             factores = self._obtener_factores_riesgo(mensaje, remitente)
-            
+
             return {
                 "es_fraudulento": bool(es_fraudulento),
                 "probabilidad_fraude": round(probabilidad, 4),
@@ -286,3 +340,4 @@ class SmishingPredictor:
             print(f"Error en predict: {str(e)}")
             print(f"Traceback: {traceback.format_exc()}")
             raise Exception(f"Error en predicción: {str(e)}")
+
