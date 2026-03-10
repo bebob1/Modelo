@@ -1,7 +1,22 @@
+import os
+import sys
+
+# CRÍTICO: Forzar uso de tf_keras ANTES de cualquier import
+# Sin esto, transformers carga keras 3.x incompatible con TFBertModel
+os.environ['TF_USE_LEGACY_KERAS'] = '1'
+try:
+    import tf_keras as _tf_keras
+    sys.modules['keras'] = _tf_keras
+    sys.modules['keras.src'] = _tf_keras
+    sys.modules['keras.layers'] = _tf_keras.layers
+    sys.modules['keras.models'] = _tf_keras.models
+    sys.modules['keras.backend'] = _tf_keras.backend
+except ImportError:
+    pass
+
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-import os
 import random
 
 # Configurar semillas para reproducibilidad COMPLETA
@@ -335,8 +350,9 @@ def extraer_caracteristicas_bert(textos, max_length=MAX_LENGTH):
             attention_mask=batch_attention_mask
         )
         
-        # Guardar el pooled output (representación del token [CLS])
-        all_features.append(outputs.pooler_output.numpy())
+        # Usar token CLS del último hidden state (determinístico, pesos correctamente cargados).
+        # pooler_output se re-inicializa aleatoriamente al cargar el checkpoint y no es reproducible.
+        all_features.append(outputs.last_hidden_state[:, 0, :].numpy())
     
     print(f"\n✓ Características BERT extraídas para {len(textos)} textos")
     
@@ -1202,4 +1218,4 @@ def principal_mejorado(ruta_archivo, guardar=True):
 if __name__ == "__main__":
     # Archivo de datos (CSV recomendado para mejor compatibilidad)
     ruta_archivo = "datos_sms.csv"  # También funciona con "datos_sms.xlsx"
-    modelo, umbral_optimo = principal_mejorado(ruta_archivo)
+    modelo, umbral_optimo = principal_mejorado(ruta_archivo, guardar=True)
