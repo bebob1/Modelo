@@ -171,16 +171,23 @@ async def predict(request: SMSRequest, _: str = Security(verify_api_key)):
         mensaje_resultado = "✅ El mensaje no presenta indicios de fraude."
 
         if resultado["es_fraudulento"]:
-            # Guardar en la base de datos
-            id_registro = save_fraudulent_message(
-                mensaje=request.mensaje,
-                remitente=request.remitente,
-                probabilidad=resultado["probabilidad_fraude"]
-            )
-            mensaje_resultado = (
-                f"⚠️ El mensaje es fraudulento y ha sido guardado exitosamente "
-                f"en la base de datos con ID {id_registro}."
-            )
+            # Intentar guardar en BD — si falla, devolvemos la predicción igual
+            try:
+                id_registro = save_fraudulent_message(
+                    mensaje=request.mensaje,
+                    remitente=request.remitente,
+                    probabilidad=resultado["probabilidad_fraude"]
+                )
+                mensaje_resultado = (
+                    f"⚠️ El mensaje es fraudulento y ha sido guardado exitosamente "
+                    f"en la base de datos con ID {id_registro}."
+                )
+            except Exception as db_err:
+                print(f"[WARN] No se pudo guardar en BD: {db_err}")
+                mensaje_resultado = (
+                    "⚠️ El mensaje es fraudulento. "
+                    "(No se pudo guardar en la base de datos.)"
+                )
 
         return SMSResponse(
             es_fraudulento=resultado["es_fraudulento"],
@@ -190,10 +197,6 @@ async def predict(request: SMSRequest, _: str = Security(verify_api_key)):
             mensaje_resultado=mensaje_resultado,
             id_registro=id_registro
         )
-
-    except RuntimeError as e:
-        # Error de base de datos
-        raise HTTPException(status_code=503, detail=str(e))
 
     except Exception as e:
         raise HTTPException(

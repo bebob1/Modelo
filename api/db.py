@@ -1,13 +1,19 @@
 import os
-import mysql.connector
-from mysql.connector import Error
+try:
+    import pymysql
+    pymysql.install_as_MySQLdb()
+    import pymysql as mysql_driver
+    from pymysql import Error
+except ImportError:
+    import mysql.connector as mysql_driver
+    from mysql.connector import Error
 from dotenv import load_dotenv
 
 load_dotenv()
 
 def get_connection():
     """Crea y retorna una conexión a la base de datos MySQL."""
-    return mysql.connector.connect(
+    return mysql_driver.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
@@ -82,5 +88,8 @@ def save_fraudulent_message(mensaje: str, remitente: str, probabilidad: float) -
     finally:
         if cursor:
             cursor.close()
-        if conn and conn.is_connected():
-            conn.close()
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
