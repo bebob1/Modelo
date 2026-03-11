@@ -41,7 +41,7 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
 # ---------------------------------------------------------------------------
 # Rutas del modelo
 # ---------------------------------------------------------------------------
-MODEL_PATH     = "../modelo_smishing.keras"
+MODEL_PATH     = "../modelo_detector_smishing_mejorado.keras"
 THRESHOLD_PATH = "../umbral_optimo.npy"
 
 predictor: Optional[SmishingPredictor] = None
