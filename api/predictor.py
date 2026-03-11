@@ -1,9 +1,24 @@
 import os
-import numpy as np
-import pandas as pd
+import sys
 import re
+import warnings
 
-# Usar tf_keras para compatibilidad (igual que modelo2.py)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# Patch keras ANTES de cualquier import (igual que modelo2.py)
+os.environ["TF_USE_LEGACY_KERAS"] = "1"
+try:
+    import tf_keras as _tfk
+    sys.modules.setdefault("keras", _tfk)
+    sys.modules.setdefault("keras.layers", _tfk.layers)
+    sys.modules.setdefault("keras.models", _tfk.models)
+    sys.modules.setdefault("keras.backend", _tfk.backend)
+except ImportError:
+    pass
+
+import numpy as np
+
 try:
     import tf_keras as keras
     from tf_keras.models import load_model
@@ -11,333 +26,192 @@ except ImportError:
     import keras
     from keras.models import load_model
 
-from transformers import TFBertModel, BertTokenizerFast
+from transformers import AutoTokenizer, TFBertModel
 from typing import Dict, List, Tuple
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Constantes — deben coincidir EXACTAMENTE con modelo2.py
+# ─────────────────────────────────────────────────────────────────────────────
+BERT_MODEL_NAME = "dccuchile/bert-base-spanish-wwm-cased"
+MAX_LENGTH      = 128
+
+FEATURE_COLS = [
+    "msg_len", "msg_palabras", "msg_mayus", "msg_especiales",
+    "rem_len", "rem_numerico", "rem_letras",
+    "rem_empieza3", "rem_corto", "rem_movil10", "rem_anormal",
+    "tiene_url", "tiene_urgencia", "tiene_dinero", "tiene_banco",
+    "tiene_verif", "tiene_servicio", "sin_tildes",
+    "movil_fraude", "tiene_premio", "monto_grande",
+    "llamada_accion", "patron_premio",
+]
+
+_PALABRAS_SIN_TILDE = {
+    "cancelo", "abonara", "esta", "numero", "ultimo", "cedula",
+    "tambien", "asi", "rapido", "valido", "codigo", "telefono",
+    "transaccion", "comunicacion", "atencion", "reembolso",
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Extracción de características numéricas — idéntico a modelo2.py
+# ─────────────────────────────────────────────────────────────────────────────
+def _extraer_caracteristicas(mensaje: str, remitente: str) -> np.ndarray:
+    """Extrae las 23 features numéricas. Debe ser idéntico a modelo2.py."""
+    def _m(kws, t):
+        return int(any(k in t.lower() for k in kws))
+
+    msg   = str(mensaje)
+    rem   = str(remitente)
+    msg_l = msg.lower()
+    _url_re = r"https?://|www\.|\.com|bit\.ly|\.co\b"
+
+    d = {}
+    d["msg_len"]        = len(msg)
+    d["msg_palabras"]   = len(msg.split())
+    d["msg_mayus"]      = sum(1 for c in msg if c.isupper()) / max(len(msg), 1)
+    d["msg_especiales"] = sum(1 for c in msg if not c.isalnum() and not c.isspace()) / max(len(msg), 1)
+
+    d["rem_len"]      = len(rem)
+    d["rem_numerico"] = int(rem.isdigit())
+    d["rem_letras"]   = int(any(c.isalpha() for c in rem))
+    d["rem_empieza3"] = int(bool(rem) and rem[0] == "3" and rem.isdigit())
+    d["rem_corto"]    = int(rem.isdigit() and 4 <= len(rem) <= 6)
+    d["rem_movil10"]  = int(rem.isdigit() and len(rem) == 10 and rem[0] == "3")
+    d["rem_anormal"]  = int(rem.isdigit() and len(rem) > 6 and len(rem) != 10)
+
+    d["tiene_url"]      = int(bool(re.search(_url_re, msg_l)))
+    d["tiene_urgencia"] = _m(["urgente", "inmediatamente", "expira", "vence",
+                               "caduca", "apresúrate"], msg)
+    d["tiene_dinero"]   = _m(["$", "pesos", "gratis", "premio", "reembolso",
+                               "descuento", "oferta", "cashback"], msg)
+    d["tiene_banco"]    = _m(["banco", "cuenta", "tarjeta", "crédito", "débito",
+                               "saldo", "transferencia", "clave", "pin"], msg)
+    d["tiene_verif"]    = _m(["verificar", "confirmar", "actualizar", "validar",
+                               "suspendido", "bloqueado", "reactivar", "ingresar",
+                               "haz clic", "ingrese"], msg)
+    d["tiene_servicio"] = _m(["didi", "uber", "rappi", "bancolombia", "davivienda",
+                               "nequi", "daviplata", "bbva"], msg)
+
+    palabras = set(re.sub(r"[^\w\s]", "", msg_l).split())
+    d["sin_tildes"]     = int(bool(palabras & _PALABRAS_SIN_TILDE))
+    d["tiene_premio"]   = _m(["ganaste", "ganador", "premio", "sorteo",
+                               "lotería", "felicidades"], msg)
+    d["monto_grande"]   = int(bool(re.search(
+        r"\$\s*[1-9]\d{5,}|\d{1,3}(?:[.,]\d{3}){2,}", msg)))
+    d["llamada_accion"] = _m(["haz clic", "click aquí", "clic aquí",
+                               "ingresa", "ingrese", "visita", "entra"], msg)
+
+    d["movil_fraude"]  = int(
+        d["rem_empieza3"] == 1 and
+        (d["tiene_url"] == 1 or d["tiene_verif"] == 1 or d["sin_tildes"] == 1)
+    )
+    d["patron_premio"] = int(
+        (d["tiene_premio"] == 1 or d["monto_grande"] == 1) and
+        (d["tiene_url"] == 1 or d["llamada_accion"] == 1)
+    )
+
+    return np.array([[d[col] for col in FEATURE_COLS]], dtype=np.float32)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Clase principal
+# ─────────────────────────────────────────────────────────────────────────────
 class SmishingPredictor:
     """
-    Predictor de smishing que usa el modelo entrenado.
+    Predictor de smishing — solo el modelo, sin reglas externas.
+    Usa modelo_smishing.keras generado por la nueva versión de modelo2.py.
     """
-    
+
     def __init__(self, model_path: str, threshold_path: str):
-        """
-        Inicializa el predictor cargando el modelo y umbral.
-        
-        Args:
-            model_path: Ruta al archivo .keras del modelo
-            threshold_path: Ruta al archivo .npy del umbral
-        """
         print("Cargando modelo...")
-        self.model = load_model(model_path)
+        # TFBertModel es la clase real que TFAutoModel instancia para BETO
+        self.model = load_model(
+            model_path,
+            custom_objects={"TFBertModel": TFBertModel}
+        )
         self.threshold = float(np.load(threshold_path))
-        
-        # BERT se carga lazy (solo cuando se necesita)
-        self.tokenizer = None
-        self.bert_model = None
-        
-        print(f"✓ Modelo cargado")
+
+        n_inputs = len(self.model.inputs)
+        print(f"✓ Modelo cargado  ({n_inputs} inputs → fine-tuned end-to-end)",
+              flush=True)
         print(f"✓ Umbral óptimo: {self.threshold:.4f}")
-    
-    def _cargar_bert(self):
-        """Carga BERT solo cuando se necesita (lazy loading)."""
-        if self.tokenizer is None or self.bert_model is None:
-            print("Cargando BERT...")
-            self.tokenizer = BertTokenizerFast.from_pretrained(
-                "dccuchile/bert-base-spanish-wwm-cased"
-            )
-            self.bert_model = TFBertModel.from_pretrained(
-                "dccuchile/bert-base-spanish-wwm-cased"
-            )
-            print("✓ BERT cargado")
-    
-    def _extraer_caracteristicas_numericas(self, mensaje: str, remitente: str) -> np.ndarray:
-        """
-        Extrae las 23 características numéricas del mensaje y remitente.
-        
-        Args:
-            mensaje: Texto del SMS
-            remitente: Número o nombre del remitente
-            
-        Returns:
-            Array numpy con 23 características
-        """
-        features = {}
-        
-        # Características del mensaje (4)
-        features['mensaje_longitud'] = len(str(mensaje))
-        features['mensaje_palabras'] = len(str(mensaje).split())
-        features['mensaje_mayusculas_ratio'] = sum(1 for c in str(mensaje) if c.isupper()) / max(len(str(mensaje)), 1)
-        features['mensaje_caracteres_especiales'] = sum(1 for c in str(mensaje) if not c.isalnum() and not c.isspace()) / max(len(str(mensaje)), 1)
-        
-        # Características del remitente (7)
-        features['remitente_longitud'] = len(str(remitente))
-        features['remitente_es_numerico'] = 1 if str(remitente).isdigit() else 0
-        features['remitente_tiene_letras'] = 1 if any(c.isalpha() for c in str(remitente)) else 0
-        features['remitente_empieza_3'] = 1 if str(remitente).startswith('3') and str(remitente).isdigit() else 0
-        features['remitente_numero_corto'] = 1 if str(remitente).isdigit() and 4 <= len(str(remitente)) <= 6 else 0
-        features['remitente_movil_estandar'] = 1 if str(remitente).isdigit() and len(str(remitente)) == 10 and str(remitente).startswith('3') else 0
-        
-        # Longitud anormal
-        if str(remitente).isdigit():
-            longitud = len(str(remitente))
-            features['remitente_longitud_anormal'] = 1 if longitud not in [4, 5, 6, 10] else 0
-        else:
-            features['remitente_longitud_anormal'] = 0
-        
-        # Características de contenido (8)
-        mensaje_lower = str(mensaje).lower()
-        
-        features['contiene_url'] = 1 if re.search(r'http[s]?://|www\.|\.com|\.org|\.net|bit\.ly|\.co\b', mensaje_lower) else 0
-        
-        palabras_urgencia = ['urgente', 'inmediatamente', 'ahora', 'rápido', 'expira', 'vence', 'hoy', 'ya']
-        features['contiene_urgencia'] = 1 if any(palabra in mensaje_lower for palabra in palabras_urgencia) else 0
-        
-        palabras_dinero = ['$', 'pesos', 'dinero', 'gratis', 'premio', 'ganador', 'millones', 'ganaste']
-        features['contiene_dinero'] = 1 if any(palabra in mensaje_lower for palabra in palabras_dinero) else 0
-        
-        palabras_banco = ['banco', 'bancolombia', 'davivienda', 'nequi', 'cuenta', 'tarjeta', 'credito', 'debito']
-        features['contiene_banco'] = 1 if any(palabra in mensaje_lower for palabra in palabras_banco) else 0
-        
-        palabras_verificacion = ['verificar', 'confirmar', 'validar', 'actualizar', 'activar', 'bloqueo', 'suspendido']
-        features['contiene_verificacion'] = 1 if any(palabra in mensaje_lower for palabra in palabras_verificacion) else 0
-        
-        servicios_legitimos = ['didi', 'uber', 'rappi', 'bancolombia', 'nequi', 'daviplata']
-        features['menciona_servicio_conocido'] = 1 if any(servicio in mensaje_lower for servicio in servicios_legitimos) else 0
-        
-        palabras_error = ['isu', 'ingrese', 'confirme', 'verifique']
-        features['tiene_errores_ortograficos'] = 1 if any(error in mensaje_lower for error in palabras_error) else 0
-        
-        llamadas_accion = ['haz clic', 'ingresa', 'entra', 'visita', 'descarga', 'instala']
-        features['llamada_accion_sospechosa'] = 1 if any(llamada in mensaje_lower for llamada in llamadas_accion) else 0
-        
-        # Características combinadas (4)
-        features['sospecha_movil_fraudulento'] = 1 if (
-            features['remitente_empieza_3'] == 1 and (
-                features['contiene_url'] == 1 or 
-                features['contiene_verificacion'] == 1 or 
-                features['tiene_errores_ortograficos'] == 1
-            )
-        ) else 0
-        
-        features['contiene_premio'] = 1 if any(palabra in mensaje_lower for palabra in ['ganaste', 'premio', 'sorteo']) else 0
-        features['monto_grande'] = 1 if re.search(r'\$\s*[1-9]\d{5,}|\d{1,3}(?:[.,]\d{3}){2,}', str(mensaje)) else 0
-        
-        features['patron_estafa_premio'] = 1 if (
-            (features['contiene_premio'] == 1 or features['monto_grande'] == 1) and
-            (features['contiene_url'] == 1 or features['llamada_accion_sospechosa'] == 1)
-        ) else 0
-        
-        # Convertir a array en el orden EXACTO usado durante el entrenamiento (modelo2.py)
-        feature_names = [
-            'mensaje_longitud', 'mensaje_palabras', 'mensaje_mayusculas_ratio', 'mensaje_caracteres_especiales',
-            'remitente_longitud', 'remitente_es_numerico', 'remitente_tiene_letras',
-            'remitente_empieza_3', 'remitente_numero_corto', 'remitente_movil_estandar', 'remitente_longitud_anormal',
-            'contiene_url', 'contiene_urgencia', 'contiene_dinero', 'contiene_banco',
-            'contiene_verificacion', 'menciona_servicio_conocido', 'tiene_errores_ortograficos',
-            'sospecha_movil_fraudulento', 'contiene_premio', 'monto_grande', 'llamada_accion_sospechosa',
-            'patron_estafa_premio'
-        ]
-        
-        return np.array([[features[name] for name in feature_names]], dtype=np.float32)
-    
-    def _extraer_bert_features(self, mensaje: str) -> np.ndarray:
-        """
-        Extrae embeddings de BERT (768 dimensiones).
-        
-        Args:
-            mensaje: Texto del SMS
-            
-        Returns:
-            Array numpy con 768 dimensiones
-        """
-        self._cargar_bert()
-        
-        # Tokenizar
-        tokens = self.tokenizer(
+
+        self.tokenizer = None   # lazy
+
+    def _cargar_tokenizer(self):
+        if self.tokenizer is None:
+            print("Cargando tokenizador BERT...")
+            self.tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_NAME)
+            print("✓ Tokenizador listo")
+
+    def _tokenizar(self, mensaje: str) -> Tuple[np.ndarray, np.ndarray]:
+        self._cargar_tokenizer()
+        enc = self.tokenizer(
             [mensaje],
-            max_length=128,
-            padding='max_length',
+            max_length=MAX_LENGTH,
+            padding="max_length",
             truncation=True,
-            return_tensors='tf'
+            return_tensors="np",
         )
-        
-        # Obtener embeddings
-        outputs = self.bert_model(
-            input_ids=tokens['input_ids'],
-            attention_mask=tokens['attention_mask']
-        )
-        
-        # Usar el token CLS del último hidden state en lugar de pooler_output.
-        # El pooler se re-inicializa aleatoriamente al cargar el checkpoint (warning HuggingFace),
-        # mientras que el encoder (last_hidden_state) carga los pesos originales correctamente.
-        # last_hidden_state[:, 0, :] equivale al token [CLS] → representación global del texto.
-        return outputs.last_hidden_state[:, 0, :].numpy()
-    
-    def _obtener_factores_riesgo(self, mensaje: str, remitente: str) -> List[str]:
-        """
-        Identifica factores de riesgo presentes en el mensaje.
-        
-        Args:
-            mensaje: Texto del SMS
-            remitente: Número o nombre del remitente
-            
-        Returns:
-            Lista de factores de riesgo detectados
-        """
-        factores = []
-        mensaje_lower = str(mensaje).lower()
-        
-        # Remitente
-        if str(remitente).isdigit():
-            factores.append("remitente_es_numerico")
-            if str(remitente).startswith('3'):
-                factores.append("remitente_empieza_3")
-            if len(str(remitente)) == 10 and str(remitente).startswith('3'):
-                factores.append("remitente_movil_estandar")
-            elif 4 <= len(str(remitente)) <= 6:
-                factores.append("remitente_numero_corto")
-            elif len(str(remitente)) not in [4, 5, 6, 10]:
-                factores.append("remitente_longitud_anormal")
-        
-        # Contenido
-        if re.search(r'http[s]?://|www\.|\.com|\.org|\.net|bit\.ly|\.co\b', mensaje_lower):
-            factores.append("contiene_url")
-        if any(palabra in mensaje_lower for palabra in ['urgente', 'inmediatamente', 'ahora', 'rápido']):
-            factores.append("contiene_urgencia")
-        if any(palabra in mensaje_lower for palabra in ['$', 'pesos', 'dinero', 'gratis', 'premio']):
-            factores.append("contiene_dinero")
-        if any(palabra in mensaje_lower for palabra in ['banco', 'bancolombia', 'cuenta', 'tarjeta']):
-            factores.append("contiene_banco")
-        if any(palabra in mensaje_lower for palabra in ['verificar', 'confirmar', 'validar', 'actualizar']):
-            factores.append("contiene_verificacion")
-        if any(servicio in mensaje_lower for servicio in ['didi', 'uber', 'rappi', 'bancolombia']):
-            factores.append("menciona_servicio_conocido")
-        if any(error in mensaje_lower for error in ['isu', 'ingrese', 'confirme']):
-            factores.append("tiene_errores_ortograficos")
-        if any(palabra in mensaje_lower for palabra in ['ganaste', 'premio', 'sorteo']):
-            factores.append("contiene_premio")
-        if re.search(r'\$\s*[1-9]\d{5,}', str(mensaje)):
-            factores.append("monto_grande")
-        if any(llamada in mensaje_lower for llamada in ['haz clic', 'ingresa', 'entra']):
-            factores.append("llamada_accion_sospechosa")
-        
-        # Patrones combinados
-        if "remitente_empieza_3" in factores and ("contiene_url" in factores or "contiene_verificacion" in factores):
-            factores.append("sospecha_movil_fraudulento")
-        if ("contiene_premio" in factores or "monto_grande" in factores) and ("contiene_url" in factores or "llamada_accion_sospechosa" in factores):
-            factores.append("patron_estafa_premio")
-        
-        return factores
-    
-    def _score_reglas(self, mensaje: str, remitente: str) -> float:
-        """
-        Score de riesgo determinístico basado en las features numéricas.
-        
-        Las reglas detectan combinaciones de señales de alto riesgo que el
-        modelo BERT (sin fine-tuning) puede pasar por alto.
-        Retorna un valor entre 0.0 y 0.95.
-        """
-        import re
-        msg_l = str(mensaje).lower()
-        rem   = str(remitente)
-
-        # --- Extraer indicadores ---
-        url      = 1 if re.search(r'http[s]?://|www\.|\.com|\.org|bit\.ly|\.co\b', msg_l) else 0
-        urgencia = 1 if any(w in msg_l for w in ['urgente','expira','vence','inmediatamente','solo hoy']) else 0
-        dinero   = 1 if any(w in msg_l for w in ['$','pesos','dinero','gratis','premio','ganador']) else 0
-        banco    = 1 if any(w in msg_l for w in ['banco','cuenta','tarjeta','crédito','débito']) else 0
-        verif    = 1 if any(w in msg_l for w in ['verificar','confirmar','validar','bloqueo','suspendido','bloqueada','reactivar']) else 0
-        servicio = 1 if any(w in msg_l for w in ['didi','uber','rappi','bancolombia','davivienda','nequi','daviplata']) else 0
-        premio   = 1 if any(w in msg_l for w in ['ganaste','premio','sorteo','lotería','felicitaciones']) else 0
-        monto    = 1 if re.search(r'\$\s*[1-9]\d{5,}|\d{1,3}(?:[.,]\d{3}){2,}', str(mensaje)) else 0
-        llamada  = 1 if any(w in msg_l for w in ['haz clic','click','ingresa','ingrese','visita','entra','descarga']) else 0
-
-        empieza3 = 1 if rem.startswith('3') and rem.isdigit() else 0
-        sospecha = 1 if empieza3 and (url or verif) else 0
-        patron   = 1 if (premio or monto) and (url or llamada) else 0
-
-        # Si es un servicio conocido y legítimo → riesgo mínimo
-        if servicio and not sospecha:
-            return max(0.0, 0.1 * (url + urgencia + verif) - 0.1)
-
-        # ---Señales críticas (combinaciones muy sospechosas) ---
-        señales_criticas = patron + sospecha + int(bool(url and (dinero or verif or urgencia)))
-
-        # --- Señales de apoyo ---
-        señales_apoyo = premio + monto + llamada + verif + urgencia + banco
-
-        # --- Tabla de decisión ---
-        if señales_criticas >= 2:
-            return 0.95
-        elif señales_criticas >= 1 and señales_apoyo >= 2:
-            return 0.90
-        elif señales_criticas >= 1 and señales_apoyo >= 1:
-            return 0.78
-        elif señales_apoyo >= 4:
-            return 0.65
-        elif señales_apoyo >= 2:
-            return 0.35
-        return 0.0
+        return enc["input_ids"], enc["attention_mask"]
 
     def predict(self, mensaje: str, remitente: str) -> Dict:
         """
-        Predice si un mensaje SMS es fraudulento.
-
-        Usa un sistema híbrido:
-          1. Modelo BERT + clasificador neuronal (generaliza semántica)
-          2. Score de reglas sobre features numéricas (determinístico, robusto)
-        
-        La probabilidad final es max(bert_score, rule_score), de modo que
-        patrones obvios de fraude siempre sean detectados.
+        Predice si un SMS es fraudulento usando SOLO el modelo fine-tuneado.
+        Sin reglas externas, sin ajuste, sin max().
         """
-        try:
-            print(f"Extrayendo características BERT...")
-            bert_features = self._extraer_bert_features(mensaje)
-            print(f"BERT features shape: {bert_features.shape}")
+        input_ids, attention_mask = self._tokenizar(mensaje)
+        num_features = _extraer_caracteristicas(mensaje, remitente)
 
-            print(f"Extrayendo características numéricas...")
-            num_features = self._extraer_caracteristicas_numericas(mensaje, remitente)
-            print(f"Num features shape: {num_features.shape}")
+        raw = self.model.predict(
+            [input_ids, attention_mask, num_features], verbose=0
+        )
+        score          = float(raw.flatten()[0])
+        es_fraudulento = score >= self.threshold
 
-            # Score del modelo BERT
-            print(f"Realizando predicción (modelo)...")
-            raw_output     = self.model.predict([bert_features, num_features], verbose=0)
-            prob_bert      = float(raw_output.flatten()[0])
-            print(f"  → prob_bert: {prob_bert:.4f}")
+        print(f"  → score={score:.4f}  umbral={self.threshold:.4f}  "
+              f"{'FRAUDE' if es_fraudulento else 'LEGIT'}")
 
-            # Score de reglas determinístico
-            prob_reglas = self._score_reglas(mensaje, remitente)
-            print(f"  → prob_reglas: {prob_reglas:.4f}")
+        nivel = (
+            "Muy probablemente legítimo"   if score <= 0.20 else
+            "Probablemente legítimo"        if score <= 0.40 else
+            "Sospechoso"                    if score <= 0.60 else
+            "Probablemente fraudulento"     if score <= 0.80 else
+            "Muy probablemente fraudulento"
+        )
 
-            # Combinación: tomar el mayor de los dos scores
-            probabilidad   = max(prob_bert, prob_reglas)
-            es_fraudulento = probabilidad >= self.threshold
-            print(f"  → prob_final: {probabilidad:.4f}  (umbral={self.threshold:.4f})")
+        factores = self._factores_riesgo(mensaje, remitente)
 
-            # Nivel de confianza
-            if probabilidad >= 0.8:
-                nivel = "Muy probablemente fraudulento"
-            elif probabilidad >= 0.6:
-                nivel = "Probablemente fraudulento"
-            elif probabilidad >= 0.4:
-                nivel = "Incierto"
-            elif probabilidad >= 0.2:
-                nivel = "Probablemente legítimo"
-            else:
-                nivel = "Muy probablemente legítimo"
+        return {
+            "es_fraudulento":      bool(es_fraudulento),
+            "probabilidad_fraude": round(score, 4),
+            "nivel_confianza":     nivel,
+            "factores_riesgo":     factores,
+        }
 
-            # Factores de riesgo
-            factores = self._obtener_factores_riesgo(mensaje, remitente)
-
-            return {
-                "es_fraudulento": bool(es_fraudulento),
-                "probabilidad_fraude": round(probabilidad, 4),
-                "nivel_confianza": nivel,
-                "factores_riesgo": factores
-            }
-        except Exception as e:
-            import traceback
-            print(f"Error en predict: {str(e)}")
-            print(f"Traceback: {traceback.format_exc()}")
-            raise Exception(f"Error en predicción: {str(e)}")
-
+    def _factores_riesgo(self, mensaje: str, remitente: str) -> List[str]:
+        """Factores de riesgo descriptivos (solo informativos, no afectan el score)."""
+        nums = _extraer_caracteristicas(mensaje, remitente)[0]
+        etiquetas = {
+            "rem_numerico":   "remitente_es_numerico",
+            "rem_empieza3":   "remitente_empieza_3",
+            "rem_movil10":    "remitente_movil_estandar",
+            "rem_corto":      "remitente_numero_corto",
+            "rem_anormal":    "remitente_longitud_anormal",
+            "tiene_url":      "contiene_url",
+            "tiene_urgencia": "contiene_urgencia",
+            "tiene_dinero":   "contiene_dinero",
+            "tiene_banco":    "contiene_banco",
+            "tiene_verif":    "contiene_verificacion",
+            "sin_tildes":     "errores_ortograficos",
+            "tiene_premio":   "contiene_premio",
+            "monto_grande":   "monto_grande",
+            "llamada_accion": "llamada_accion_sospechosa",
+            "movil_fraude":   "sospecha_movil_fraudulento",
+            "patron_premio":  "patron_estafa_premio",
+        }
+        return [
+            etiqueta
+            for col, etiqueta in etiquetas.items()
+            if col in FEATURE_COLS and nums[FEATURE_COLS.index(col)] == 1
+        ]
