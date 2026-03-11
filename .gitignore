@@ -75,3 +75,6 @@ logs/
 # Cache de transformers
 .cache/
 transformers_cache/
+
+.keras
+umbral_optimo.npy
