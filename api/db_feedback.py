@@ -229,18 +229,19 @@ def registrar_falso_positivo(
         audit_id = cur.lastrowid
 
         # 5. Registrar fallo — el FK de failures → messages impide borrar el mensaje
-        #    si failures.messages_id apunta a él. Lo insertamos y luego lo desvinculamos.
+        #    si failures.messages_id apunta a él. Lo insertamos aquí y luego desvinculamos.
         cur.execute(
             "INSERT INTO failures (messages_id, type_of_failure_id) VALUES (%s, %s)",
             (message_id, TYPE_FALSO_POSITIVO)
         )
         failure_id = cur.lastrowid
 
-        # 6. Desvincular failures.messages_id para poder borrar el mensaje
-        #    (la FK no tiene ON DELETE CASCADE/SET NULL en el schema original)
+        # 6. Desvincular TODOS los failures que apunten a este mensaje
+        #    (pueden existir registros anteriores además del que acabamos de insertar).
+        #    El schema no tiene ON DELETE SET NULL, así que lo hacemos manualmente.
         cur.execute(
-            "UPDATE failures SET messages_id = NULL WHERE id = %s",
-            (failure_id,)
+            "UPDATE failures SET messages_id = NULL WHERE messages_id = %s",
+            (message_id,)
         )
 
         # 7. Decrementar fraud_count del número remitente
