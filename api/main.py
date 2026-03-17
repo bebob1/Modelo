@@ -22,6 +22,7 @@ from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel, Field
 from predictor import SmishingPredictor
 from db import save_fraudulent_message
+from db_feedback import registrar_falso_negativo, registrar_falso_positivo
 
 # ---------------------------------------------------------------------------
 # Autenticación por API Key
@@ -183,6 +184,135 @@ async def predict(request: SMSRequest, _: str = Security(verify_api_key)):
             status_code=500,
             detail=f"Error al procesar la predicción: {e}",
         )
+
+# ---------------------------------------------------------------------------
+# Modelos de datos — Retroalimentación
+# ---------------------------------------------------------------------------
+class FalsoNegativoRequest(BaseModel):
+    """
+    El modelo NO marcó el mensaje como fraude,
+    pero el usuario confirma que SÍ es fraude.
+    """
+    message_body:    str   = Field(..., min_length=1, description="Texto del SMS fraudulento")
+    sender_number:   str   = Field(..., min_length=1, description="Número que envió el SMS")
+    detection_score: float = Field(..., ge=0.0, le=1.0,
+                                   description="Score que devolvió el modelo (era bajo)")
+    device_id:       str   = Field(..., min_length=1,
+                                   description="Identificador del dispositivo (número personal del cel)")
+    age_group:       Optional[str] = Field(None, description="Rango de edad del usuario")
+    device_type:     Optional[str] = Field(None, description="Tipo de dispositivo (Android/iOS)")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "message_body":    "Ganaste $5.000.000 haz clic: bit.ly/x",
+                "sender_number":   "3209876543",
+                "detection_score": 0.32,
+                "device_id":       "3001234567",
+                "age_group":       "25-34",
+                "device_type":     "Android",
+            }
+        }
+    }
+
+class FalsoPositivoRequest(BaseModel):
+    """
+    El modelo SÍ marcó el mensaje como fraude,
+    pero el usuario dice que NO es fraude.
+    """
+    message_id:  int  = Field(..., gt=0, description="ID del mensaje en la BD")
+    device_id:   str  = Field(..., min_length=1,
+                               description="Identificador del dispositivo (número personal del cel)")
+    age_group:   Optional[str] = Field(None, description="Rango de edad del usuario")
+    device_type: Optional[str] = Field(None, description="Tipo de dispositivo (Android/iOS)")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "message_id":  42,
+                "device_id":   "3001234567",
+                "age_group":   "18-24",
+                "device_type": "iOS",
+            }
+        }
+    }
+
+# ---------------------------------------------------------------------------
+# Endpoints — Retroalimentación
+# ---------------------------------------------------------------------------
+@app.post("/feedback/false-negative", status_code=201)
+async def feedback_false_negative(
+    request: FalsoNegativoRequest,
+    _: str = Security(verify_api_key)
+):
+    """
+    **Falso Negativo**: el modelo NO detectó fraude, pero el usuario confirma que SÍ es fraude.
+
+    - Añade el mensaje a la base de datos.
+    - Incrementa `fraud_count` del remitente.
+    - Registra la acción en `audit_log` y el fallo en `failures`.
+
+    **Requiere** el header `X-API-Key`.
+    """
+    try:
+        resultado = registrar_falso_negativo(
+            message_body=request.message_body,
+            sender_number=request.sender_number,
+            detection_score=request.detection_score,
+            device_id=request.device_id,
+            age_group=request.age_group,
+            device_type=request.device_type,
+        )
+        return {
+            "resultado":    "Mensaje fraudulento registrado correctamente",
+            "tipo_fallo":   "FALSO_NEGATIVO",
+            "message_id":   resultado["message_id"],
+            "user_id":      resultado["user_id"],
+            "audit_id":     resultado["audit_id"],
+            "failure_id":   resultado["failure_id"],
+        }
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error: {e}")
+
+
+@app.post("/feedback/false-positive", status_code=200)
+async def feedback_false_positive(
+    request: FalsoPositivoRequest,
+    _: str = Security(verify_api_key)
+):
+    """
+    **Falso Positivo**: el modelo SÍ detectó fraude, pero el usuario dice que NO es fraude.
+
+    - Elimina el mensaje de la base de datos (cascade en `phone_number_message` y `user_message`).
+    - Decrementa `fraud_count` del remitente.
+    - Registra la acción en `audit_log` y el fallo en `failures`.
+
+    **Requiere** el header `X-API-Key`.
+    """
+    try:
+        resultado = registrar_falso_positivo(
+            message_id=request.message_id,
+            device_id=request.device_id,
+            age_group=request.age_group,
+            device_type=request.device_type,
+        )
+        return {
+            "resultado":           "Mensaje eliminado correctamente de la base de datos",
+            "tipo_fallo":          "FALSO_POSITIVO",
+            "message_id_eliminado": resultado["message_id_eliminado"],
+            "user_id":             resultado["user_id"],
+            "audit_id":            resultado["audit_id"],
+            "failure_id":          resultado["failure_id"],
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error: {e}")
+
 
 if __name__ == "__main__":
     import uvicorn
