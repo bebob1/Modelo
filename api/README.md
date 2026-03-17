@@ -1,25 +1,25 @@
 # 🚀 API de Detección de Smishing
 
-API REST para detectar mensajes SMS fraudulentos usando el modelo entrenado de BERT.
-Los mensajes clasificados como fraudulentos se guardan automáticamente en la base de datos MySQL.
+API REST para detectar mensajes SMS fraudulentos usando el modelo BERT fine-tuneado en español.
+Los mensajes clasificados como fraudulentos se guardan automáticamente en MySQL.
+El sistema permite además que los usuarios corrijan errores del modelo mediante endpoints de retroalimentación.
 
 ## 📋 Características
 
-- ✅ Endpoint `/predict` para detectar smishing
-- ✅ Retorna probabilidad de fraude y factores de riesgo
-- ✅ **Guarda mensajes fraudulentos en MySQL automáticamente**
-- ✅ **Autenticación por API Key** (`X-API-Key`)
-- ✅ Usa el modelo `.keras` entrenado
+- ✅ Endpoint `/predict` — detecta smishing con BERT + reglas de negocio
+- ✅ Endpoint `/feedback/false-negative` — registra fraudes que el modelo no detectó
+- ✅ Endpoint `/feedback/false-positive` — elimina mensajes marcados incorrectamente como fraude
+- ✅ Guarda mensajes fraudulentos en MySQL automáticamente
+- ✅ Registra fallos del modelo en `failures` y acciones en `audit_log`
+- ✅ Autenticación por API Key (`X-API-Key`)
 - ✅ Documentación interactiva (Swagger UI)
-- ✅ Respuestas en JSON
 
 ---
 
 ## ⚙️ Configuración
 
-### 1. Archivos del Modelo
+### 1. Archivos del modelo
 
-Asegúrate de que existan estos archivos en la carpeta padre:
 ```
 ../modelo_detector_smishing_mejorado.keras
 ../umbral_optimo.npy
@@ -27,338 +27,332 @@ Asegúrate de que existan estos archivos en la carpeta padre:
 
 ### 2. Variables de entorno
 
-Copia el archivo de ejemplo y completa tus valores reales:
-
 ```bash
 cp .env.example .env
 ```
 
-Contenido del `.env`:
-
 ```env
-# Puerto donde se expone la API
 PORT=6000
-
-# Base de datos MySQL
 DB_HOST=localhost
 DB_USER=tu_usuario
 DB_PASSWORD=tu_contraseña
 DB_NAME=modelo
-DB_PORT=3306    # Puerto de conexión a MySQL
-
-# Autenticación — token fijo para el header X-API-Key
+DB_PORT=3306
 API_KEY=smishing-secret-token-2024
 ```
 
-> ⚠️ **Nunca subas el `.env` a un repositorio.** Usa `.env.example` como plantilla.
+> ⚠️ Nunca subas el `.env` a un repositorio.
 
-### 3. Instalar Dependencias
+### 3. Seed de la base de datos (una sola vez)
 
 ```bash
-cd api
+mysql -u tu_usuario -p modelo < seed_feedback.sql
+```
+
+Esto inserta los registros necesarios en `actions` y `type_of_failure`:
+
+| Tabla | id | description |
+|---|---|---|
+| `actions` | 1 | `REPORTAR_FRAUDE_NO_DETECTADO` |
+| `actions` | 2 | `CORREGIR_FALSA_ALARMA` |
+| `type_of_failure` | 1 | `FALSO_NEGATIVO` |
+| `type_of_failure` | 2 | `FALSO_POSITIVO` |
+
+### 4. Instalar dependencias
+
+```bash
 pip install -r requirements.txt
 ```
 
 ---
 
-## 🚀 Iniciar el Servidor
-
-```bash
-uvicorn main:app --reload --port 3000
-```
-
-O directamente con Python:
+## 🚀 Iniciar el servidor
 
 ```bash
 python main.py
 ```
 
-El servidor estará disponible en: `http://localhost:6000`
+Disponible en `http://localhost:6000`
 
 ---
 
 ## 🔑 Autenticación
 
-Todos los endpoints protegidos requieren el header **`X-API-Key`** con el token configurado en tu `.env`.
+Todos los endpoints (excepto `GET /`) requieren el header `X-API-Key`.
 
 | Header | Valor |
-|--------|-------|
-| `X-API-Key` | El valor de `API_KEY` en tu `.env` |
+|---|---|
+| `X-API-Key` | Valor de `API_KEY` en `.env` |
 
-Si el token es inválido o no se incluye, la API responde con `401 Unauthorized`.
+Respuesta sin token válido: `401 Unauthorized`
 
 ---
 
 ## 📡 Endpoints
 
 | Método | Ruta | Auth | Descripción |
-|--------|------|------|-------------|
-| `GET` | `/` | ❌ | Información general de la API |
+|---|---|---|---|
+| `GET` | `/` | ❌ | Información general |
 | `GET` | `/health` | ✅ | Estado del servidor y modelo |
-| `POST` | `/predict` | ✅ | Detectar si un SMS es fraudulento |
-| `GET` | `/docs` | ❌ | Documentación interactiva (Swagger UI) |
-| `GET` | `/redoc` | ❌ | Documentación alternativa (ReDoc) |
+| `POST` | `/predict` | ✅ | Clasifica un SMS como fraude o legítimo |
+| `POST` | `/feedback/false-negative` | ✅ | Registra un fraude que el modelo no detectó |
+| `POST` | `/feedback/false-positive` | ✅ | Corrige un mensaje mal clasificado como fraude |
+| `GET` | `/docs` | ❌ | Swagger UI |
+| `GET` | `/redoc` | ❌ | ReDoc |
 
 ---
 
 ## 📡 Ejemplos de Uso
 
-### 1. curl
+### `POST /predict`
 
-**Mensaje Fraudulento:**
+Clasifica un SMS. Si es fraudulento lo guarda en BD automáticamente.
+
+**Request:**
 ```bash
-curl -X POST "http://localhost:6000/predict" \
+curl -X POST http://212.56.33.56:6000/predict \
   -H "Content-Type: application/json" \
   -H "X-API-Key: smishing-secret-token-2024" \
   -d '{
-    "mensaje": "Ganaste un premio de $5.000.000! Haz clic aquí: bit.ly/premio123",
+    "mensaje": "Ganaste $5.000.000! Haz clic aquí: bit.ly/premio123",
     "remitente": "3209876543"
   }'
 ```
 
-**Respuesta (fraudulento — guardado en BD):**
+**Body:**
+| Campo | Tipo | Requerido | Descripción |
+|---|---|---|---|
+| `mensaje` | string | ✅ | Texto del SMS |
+| `remitente` | string | ✅ | Número o nombre del remitente |
+
+**Response — fraudulento:**
 ```json
 {
   "es_fraudulento": true,
-  "probabilidad_fraude": 0.8458,
+  "probabilidad_fraude": 0.8712,
   "nivel_confianza": "Muy probablemente fraudulento",
   "factores_riesgo": [
-    "remitente_es_numerico",
     "remitente_empieza_3",
     "contiene_dinero",
     "contiene_url",
-    "patron_estafa_premio"
+    "patron_estafa_premio",
+    "URL_ACORTADA_CON_ACCION"
   ],
-  "mensaje_resultado": "⚠️ El mensaje es fraudulento y ha sido guardado exitosamente en la base de datos con ID 42.",
+  "mensaje_resultado": "⚠️ El mensaje es fraudulento y ha sido guardado en la base de datos con ID 42.",
   "id_registro": 42
 }
 ```
 
-**Mensaje Legítimo:**
-```bash
-curl -X POST "http://localhost:6000/predict" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: smishing-secret-token-2024" \
-  -d '{
-    "mensaje": "Tu pedido de DiDi Food está en camino. Llegará en 15 minutos.",
-    "remitente": "DiDi"
-  }'
-```
-
-**Respuesta (legítimo — NO se guarda en BD):**
+**Response — legítimo:**
 ```json
 {
   "es_fraudulento": false,
-  "probabilidad_fraude": 0.0472,
+  "probabilidad_fraude": 0.0412,
   "nivel_confianza": "Muy probablemente legítimo",
-  "factores_riesgo": ["menciona_servicio_conocido"],
+  "factores_riesgo": [],
   "mensaje_resultado": "✅ El mensaje no presenta indicios de fraude.",
   "id_registro": null
 }
 ```
 
-**Token inválido:**
-```bash
-curl -X POST "http://localhost:6000/predict" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: token-incorrecto" \
-  -d '{"mensaje": "Hola", "remitente": "123"}'
-```
-
-```json
-{
-  "detail": "API Key inválida o no proporcionada. Incluye el header 'X-API-Key'."
-}
-```
-
----
-
-### 2. Python (requests)
-
-```python
-import requests
-
-BASE_URL = "http://localhost:6000"
-HEADERS = {
-    "Content-Type": "application/json",
-    "X-API-Key": "smishing-secret-token-2024"   # ← tu API_KEY del .env
-}
-
-data = {
-    "mensaje": "URGENTE: Confirme sus datos bancarios en www.banco-falso.co",
-    "remitente": "3001234567"
-}
-
-response = requests.post(f"{BASE_URL}/predict", json=data, headers=HEADERS)
-resultado = response.json()
-
-print(resultado["mensaje_resultado"])
-if resultado["es_fraudulento"]:
-    print(f"  → Guardado en BD con ID: {resultado['id_registro']}")
-```
-
----
-
-### 3. JavaScript (fetch)
-
-```javascript
-const BASE_URL = "http://localhost:6000";
-const API_KEY  = "smishing-secret-token-2024"; // tu API_KEY del .env
-
-const data = {
-  mensaje: "Ganaste $5.000.000! Haz clic aquí",
-  remitente: "3209876543"
-};
-
-fetch(`${BASE_URL}/predict`, {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "X-API-Key": API_KEY
-  },
-  body: JSON.stringify(data)
-})
-  .then(res => res.json())
-  .then(result => {
-    console.log(result.mensaje_resultado);
-    if (result.es_fraudulento) {
-      console.log("ID en BD:", result.id_registro);
-    }
-  });
-```
-
----
-
-## 📊 Formato de Request / Response
-
-### Request — `POST /predict`
-
-```json
-{
-  "mensaje": "string  (requerido, mínimo 1 carácter)",
-  "remitente": "string  (requerido, mínimo 1 carácter)"
-}
-```
-
-### Response
-
-```json
-{
-  "es_fraudulento": "boolean",
-  "probabilidad_fraude": "float  (0.0 – 1.0)",
-  "nivel_confianza": "string",
-  "factores_riesgo": ["string", "..."],
-  "mensaje_resultado": "string  — descripción amigable del resultado",
-  "id_registro": "int | null  — ID en BD si es fraudulento, null si no"
-}
-```
-
 **Niveles de confianza:**
 
-| Rango de probabilidad | Nivel |
+| Rango | Nivel |
 |---|---|
-| ≥ 0.80 | `"Muy probablemente fraudulento"` |
-| ≥ 0.60 | `"Probablemente fraudulento"` |
-| ≥ 0.40 | `"Incierto"` |
-| ≥ 0.20 | `"Probablemente legítimo"` |
-| < 0.20 | `"Muy probablemente legítimo"` |
+| > 0.80 | `Muy probablemente fraudulento` |
+| 0.60 – 0.80 | `Probablemente fraudulento` |
+| 0.40 – 0.60 | `Sospechoso` |
+| 0.20 – 0.40 | `Probablemente legítimo` |
+| < 0.20 | `Muy probablemente legítimo` |
 
 ---
 
-## 🗄️ Base de Datos
+### `POST /feedback/false-negative`
 
-Cuando un mensaje es clasificado como **fraudulento**, se insertan registros en:
+**Caso:** el modelo **NO** marcó el mensaje como fraude, pero el usuario confirma que **SÍ** es fraude.
 
-| Tabla | Qué se guarda |
-|---|---|
-| `messages` | Cuerpo del mensaje, `detection_score` (probabilidad × 100), `received_at` |
-| `phone_number` | Número remitente; si ya existe, incrementa `fraud_count` |
-| `phone_number_message` | Relación entre el número y el mensaje |
+**Efecto en BD:**
+- Añade el mensaje a `messages`
+- Incrementa `fraud_count` en `phone_number`
+- Crea relación en `phone_number_message`
+- Crea o recupera el usuario en `users` (por `device_id`)
+- Registra en `audit_log` (acción: `REPORTAR_FRAUDE_NO_DETECTADO`)
+- Registra en `failures` (tipo: `FALSO_NEGATIVO`)
 
----
-
-## 🔍 Factores de Riesgo
-
-**Remitente:**
-- `remitente_es_numerico`, `remitente_empieza_3`, `remitente_movil_estandar`
-- `remitente_numero_corto`, `remitente_longitud_anormal`
-
-**Contenido:**
-- `contiene_url`, `contiene_urgencia`, `contiene_dinero`, `contiene_banco`
-- `contiene_verificacion`, `menciona_servicio_conocido`
-- `tiene_errores_ortograficos`, `contiene_premio`, `monto_grande`
-- `llamada_accion_sospechosa`
-
-**Patrones combinados:**
-- `sospecha_movil_fraudulento` ⭐
-- `patron_estafa_premio` ⭐
-
----
-
-## 🧪 Testing
-
+**Request:**
 ```bash
-python test_api.py
+curl -X POST http://212.56.33.56:6000/feedback/false-negative \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: smishing-secret-token-2024" \
+  -d '{
+    "message_body":    "Ganaste $5.000.000! Haz clic aquí: bit.ly/premio123",
+    "sender_number":   "3209876543",
+    "detection_score": 0.32,
+    "device_id":       "3001234567",
+    "age_group":       "25-34",
+    "device_type":     "Android"
+  }'
 ```
 
-> Si el script usa la API sin el header `X-API-Key`, actualízalo para incluirlo.
+**Body:**
+| Campo | Tipo | Requerido | Descripción |
+|---|---|---|---|
+| `message_body` | string | ✅ | Texto del SMS fraudulento |
+| `sender_number` | string | ✅ | Número que envió el SMS |
+| `detection_score` | float (0–1) | ✅ | Score que devolvió el modelo (era bajo) |
+| `device_id` | string | ✅ | Número personal del celular (identifica al usuario) |
+| `age_group` | string | ❌ | Rango de edad (`"18-24"`, `"25-34"`, etc.) |
+| `device_type` | string | ❌ | Tipo de dispositivo (`"Android"`, `"iOS"`) |
+
+**Response:**
+```json
+{
+  "resultado":  "Mensaje fraudulento registrado correctamente",
+  "tipo_fallo": "FALSO_NEGATIVO",
+  "message_id": 715,
+  "user_id":    12,
+  "audit_id":   88,
+  "failure_id": 5
+}
+```
+
+**Response — campos:**
+| Campo | Descripción |
+|---|---|
+| `resultado` | Confirmación textual |
+| `tipo_fallo` | Siempre `"FALSO_NEGATIVO"` |
+| `message_id` | ID del mensaje insertado en `messages` |
+| `user_id` | ID del usuario en `users` |
+| `audit_id` | ID del registro en `audit_log` |
+| `failure_id` | ID del registro en `failures` |
 
 ---
 
-## 📝 Documentación Interactiva
+### `POST /feedback/false-positive`
 
-Una vez iniciado el servidor, visita:
+**Caso:** el modelo **SÍ** marcó el mensaje como fraude, pero el usuario dice que **NO** es fraude.
+
+**Efecto en BD:**
+- Elimina el mensaje de `messages` (cascade elimina `phone_number_message` y `user_message`)
+- Decrementa `fraud_count` en `phone_number`
+- Crea o recupera el usuario en `users` (por `device_id`)
+- Registra en `audit_log` (acción: `CORREGIR_FALSA_ALARMA`)
+- Registra en `failures` (tipo: `FALSO_POSITIVO`, con `messages_id = NULL` ya que el mensaje se elimina)
+
+**Request:**
+```bash
+curl -X POST http://212.56.33.56:6000/feedback/false-positive \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: smishing-secret-token-2024" \
+  -d '{
+    "message_id":  42,
+    "device_id":   "3001234567",
+    "age_group":   "18-24",
+    "device_type": "Android"
+  }'
+```
+
+**Body:**
+| Campo | Tipo | Requerido | Descripción |
+|---|---|---|---|
+| `message_id` | int | ✅ | ID del mensaje en BD (devuelto por `/predict` en `id_registro`) |
+| `device_id` | string | ✅ | Número personal del celular (identifica al usuario) |
+| `age_group` | string | ❌ | Rango de edad |
+| `device_type` | string | ❌ | Tipo de dispositivo |
+
+**Response:**
+```json
+{
+  "resultado":            "Mensaje eliminado correctamente de la base de datos",
+  "tipo_fallo":           "FALSO_POSITIVO",
+  "message_id_eliminado": 42,
+  "user_id":              12,
+  "audit_id":             89,
+  "failure_id":           6
+}
+```
+
+**Response — campos:**
+| Campo | Descripción |
+|---|---|
+| `resultado` | Confirmación textual |
+| `tipo_fallo` | Siempre `"FALSO_POSITIVO"` |
+| `message_id_eliminado` | ID del mensaje eliminado de `messages` |
+| `user_id` | ID del usuario en `users` |
+| `audit_id` | ID del registro en `audit_log` |
+| `failure_id` | ID del registro en `failures` |
+
+**Error — mensaje no encontrado:**
+```json
+{
+  "detail": "No se encontró el mensaje con ID 42"
+}
+```
+HTTP status: `404 Not Found`
+
+---
+
+## 🗄️ Flujo en base de datos
+
+### Falso Negativo — añadir mensaje no detectado
+
+```
+INSERT messages
+INSERT/UPDATE phone_number  (fraud_count + 1)
+INSERT phone_number_message
+GET/CREATE users            (por device_id)
+INSERT user_message
+INSERT audit_log            (action_id = 1)
+INSERT failures             (type_of_failure_id = 1)
+```
+
+### Falso Positivo — eliminar mensaje mal clasificado
+
+```
+CHECK messages existe
+GET phone_number_id via phone_number_message
+GET/CREATE users            (por device_id)
+INSERT audit_log            (action_id = 2)
+INSERT failures             (type_of_failure_id = 2)
+UPDATE failures SET messages_id = NULL  (libera FK)
+UPDATE phone_number SET fraud_count - 1
+DELETE messages             (CASCADE → phone_number_message, user_message)
+```
+
+---
+
+## 🔍 Factores de riesgo (`factores_riesgo` en `/predict`)
+
+**Remitente:**
+`remitente_es_numerico`, `remitente_empieza_3`, `remitente_movil_estandar`, `remitente_numero_corto`, `remitente_longitud_anormal`
+
+**Contenido:**
+`contiene_url`, `contiene_urgencia`, `contiene_dinero`, `contiene_banco`, `contiene_verificacion`, `errores_ortograficos`, `contiene_premio`, `monto_grande`, `llamada_accion_sospechosa`
+
+**Patrones combinados:**
+`sospecha_movil_fraudulento` ⭐, `patron_estafa_premio` ⭐
+
+**Reglas de negocio activadas:**
+`URL_ACORTADA_CON_ACCION`, `PREMIO_CON_MONTO_GRANDE`, `MOVIL_COL_URL_VERIFICACION`, `NUM_ANORMAL_URL_BANCO`, `URGENCIA_EXTREMA_DATOS_PERSONALES`
+
+---
+
+## 🐛 Solución de problemas
+
+| Error | Causa | Solución |
+|---|---|---|
+| `401 Unauthorized` | Token inválido o ausente | Incluir `X-API-Key` correcto |
+| `404 Not Found` en false-positive | `message_id` no existe en BD | Verificar el ID devuelto por `/predict` |
+| `503 Modelo no cargado` | Archivo `.keras` no encontrado | Verificar ruta `../modelo_detector_smishing_mejorado.keras` |
+| `500` en BD | Credenciales incorrectas | Revisar `.env` y que MySQL esté corriendo |
+| Primera predicción lenta | Carga de BERT | Normal, tarda ~10-15 s; las siguientes ~0.5-1 s |
+
+---
+
+## 📝 Documentación interactiva
 
 - **Swagger UI**: http://localhost:6000/docs
 - **ReDoc**: http://localhost:6000/redoc
-
-Desde Swagger UI puedes autenticarte haciendo clic en el botón **🔒 Authorize** e ingresando tu `API_KEY`.
-
----
-
-## 🐛 Solución de Problemas
-
-### `401 Unauthorized`
-El header `X-API-Key` no fue enviado o el valor no coincide con `API_KEY` en tu `.env`.
-
-### `503 — Error al guardar en la base de datos`
-Verifica que:
-- El `.env` tenga los datos de conexión correctos (`DB_HOST`, `DB_USER`, etc.)
-- MySQL esté corriendo y la base de datos `modelo` exista
-
-### `503 — Modelo no cargado`
-Verifica que existan:
-```bash
-ls -la ../modelo_detector_smishing_mejorado.keras
-ls -la ../umbral_optimo.npy
-```
-
-### `No module named 'tensorflow'` / `No module named 'mysql'`
-```bash
-pip install -r requirements.txt
-```
-
-### Primera predicción lenta
-Normal. BERT tarda ~10–15 s en cargarse. Las siguientes son rápidas (~0.5–1 s).
-
----
-
-## 📊 Performance
-
-| Métrica | Valor |
-|---|---|
-| Primera predicción | ~10–15 s (carga BERT) |
-| Predicciones siguientes | ~0.5–1 s |
-| Memoria | ~500 MB RAM |
-| Tamaño del modelo | ~3.4 MB |
-
----
-
-## 🔒 Seguridad
-
-- **API Key fija** configurada en `.env` → header `X-API-Key`
-- Para producción considera: rate limiting, HTTPS, rotar el token periódicamente
-- Nunca expongas el `.env` ni el token en el código fuente
 
 ---
 
