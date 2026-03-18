@@ -78,6 +78,7 @@ def registrar_falso_negativo(
     sender_number:   str,
     detection_score: float,
     device_id:       str,
+    ubicacion:       str | None = None,
     age_group:       str | None = None,
     device_type:     str | None = None,
 ) -> dict:
@@ -101,9 +102,9 @@ def registrar_falso_negativo(
         cur.execute(
             """
             INSERT INTO messages (message_body, detection_score, received_at, location)
-            VALUES (%s, %s, NOW(), NULL)
+            VALUES (%s, %s, NOW(), %s)
             """,
-            (message_body, score_db)
+            (message_body, score_db, ubicacion)
         )
         message_id = cur.lastrowid
 

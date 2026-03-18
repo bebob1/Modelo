@@ -22,14 +22,16 @@ def get_connection():
     )
 
 
-def save_fraudulent_message(mensaje: str, remitente: str, probabilidad: float) -> int:
+def save_fraudulent_message(mensaje: str, remitente: str,
+                             probabilidad: float,
+                             ubicacion: str | None = None) -> int:
     """
     Guarda un mensaje fraudulento en la base de datos.
-    
+
     Inserta en:
-      - messages       → el contenido y score del mensaje
-      - phone_number   → el número remitente (si es nuevo, fraud_count += 1)
-      - phone_number_message → relación entre número y mensaje
+      - messages           → contenido, score, ubicacion
+      - phone_number       → número remitente (fraud_count += 1 si ya existe)
+      - phone_number_message → relación número ↔ mensaje
 
     Retorna el ID del mensaje insertado.
     """
@@ -44,9 +46,9 @@ def save_fraudulent_message(mensaje: str, remitente: str, probabilidad: float) -
         cursor.execute(
             """
             INSERT INTO messages (message_body, detection_score, received_at, location)
-            VALUES (%s, %s, NOW(), NULL)
+            VALUES (%s, %s, NOW(), %s)
             """,
-            (mensaje, score)
+            (mensaje, score, ubicacion)
         )
         message_id = cursor.lastrowid
 

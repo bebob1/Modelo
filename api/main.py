@@ -91,12 +91,14 @@ app = FastAPI(
 class SMSRequest(BaseModel):
     mensaje:   str = Field(..., min_length=1, description="Contenido del SMS")
     remitente: str = Field(..., min_length=1, description="Número o nombre del remitente")
+    ubicacion: str = Field(..., min_length=1, description="Coordenadas GPS del dispositivo (formato: lat,lng — ej: 4.6280,-74.1419)")
 
     model_config = {
         "json_schema_extra": {
             "example": {
                 "mensaje":   "Ganaste $5.000.000! Haz clic aquí: bit.ly/premio123",
                 "remitente": "3209876543",
+                "ubicacion": "4.6280,-74.1419",
             }
         }
     }
@@ -156,6 +158,7 @@ async def predict(request: SMSRequest, _: str = Security(verify_api_key)):
                     mensaje=request.mensaje,
                     remitente=request.remitente,
                     probabilidad=resultado["probabilidad_fraude"],
+                    ubicacion=request.ubicacion,
                 )
                 mensaje_resultado = (
                     f"⚠️ El mensaje es fraudulento y ha sido guardado "
@@ -199,6 +202,7 @@ class FalsoNegativoRequest(BaseModel):
                                    description="Score que devolvió el modelo (era bajo)")
     device_id:       str   = Field(..., min_length=1,
                                    description="Identificador del dispositivo (número personal del cel)")
+    ubicacion:       Optional[str] = Field(None, description="Coordenadas GPS del dispositivo (formato: lat,lng — ej: 4.6280,-74.1419)")
     age_group:       Optional[str] = Field(None, description="Rango de edad del usuario")
     device_type:     Optional[str] = Field(None, description="Tipo de dispositivo (Android/iOS)")
 
@@ -209,6 +213,7 @@ class FalsoNegativoRequest(BaseModel):
                 "sender_number":   "3209876543",
                 "detection_score": 0.32,
                 "device_id":       "3001234567",
+                "ubicacion":       "4.6280,-74.1419",
                 "age_group":       "25-34",
                 "device_type":     "Android",
             }
@@ -260,6 +265,7 @@ async def feedback_false_negative(
             sender_number=request.sender_number,
             detection_score=request.detection_score,
             device_id=request.device_id,
+            ubicacion=request.ubicacion,
             age_group=request.age_group,
             device_type=request.device_type,
         )
